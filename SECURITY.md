@@ -6,9 +6,10 @@ Security fixes are maintained for the latest version on the `main` branch.
 
 ## Reporting a vulnerability
 
-Please use GitHub private vulnerability reporting from the repository's
-**Security** tab. Do not place API keys, private business data, customer data,
-or exploitable details in a public issue.
+Please use the repository's
+[private vulnerability reporting form](https://github.com/lzy2767865503-pixel/RetailLens-System/security/advisories/new).
+Do not place API keys, private business data, customer data, or exploitable
+details in a public issue.
 
 ## Deployment boundary
 
