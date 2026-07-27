@@ -43,7 +43,7 @@ RetailLens 以严谨专业咨询交付应具备的证据纪律、可重复计算
 
 Requirements / 环境要求：
 
-- Node.js `20.19.x` or `22.12.0+`; the repository pins the reference runtime in `.nvmrc` / Node.js `20.19.x` 或 `22.12.0+`；仓库通过 `.nvmrc` 固定参考运行环境
+- Node.js `22.13.0+`; the tested reference runtime is pinned in `.nvmrc` / Node.js `22.13.0+`；已测试的参考运行环境固定在 `.nvmrc`
 - Git
 - Internet access for the first dependency installation / 首次安装依赖时需要联网
 - An OpenAI API key is optional and is **not** required for deterministic assessment / OpenAI API 密钥可选，固定规则评估无需密钥

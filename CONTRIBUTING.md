@@ -5,7 +5,7 @@ RetailLens is maintained by **LAI ZEYU**.
 ## Development workflow
 
 1. Fork the repository and create a focused branch.
-2. Use Node.js 20.19.x or 22.12.0+ and pnpm 11.9.0.
+2. Use Node.js 22.13.0+ and pnpm 11.9.0; `.nvmrc` pins the tested runtime.
 3. Install with `pnpm install --frozen-lockfile`.
 4. Keep deterministic rules separate from optional AI interpretation.
 5. Add or update tests for scoring, evidence, gate, API, or schema changes.

@@ -5,12 +5,12 @@ SCRIPT_DIR="${0:A:h}"
 cd "$SCRIPT_DIR"
 
 if ! command -v node >/dev/null 2>&1; then
-  osascript -e 'display dialog "RetailLens 需要 Node.js 20.19.x 或 22.12 以上版本。请先安装 Node.js。\\n\\nRetailLens requires Node.js 20.19.x or Node.js 22.12+." buttons {"确定 / OK"} default button 1 with icon stop'
+  osascript -e 'display dialog "RetailLens 需要 Node.js 22.13 或更高版本。请先安装 Node.js。\\n\\nRetailLens requires Node.js 22.13 or newer." buttons {"确定 / OK"} default button 1 with icon stop'
   exit 1
 fi
 
-if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 20 && minor >= 19) || (major === 22 && minor >= 12) || major > 22 ? 0 : 1)'; then
-  osascript -e 'display dialog "当前 Node.js 版本不受支持。请使用 20.19.x 或 22.12 以上版本。\\n\\nThe installed Node.js version is unsupported. Use Node.js 20.19.x or Node.js 22.12+." buttons {"确定 / OK"} default button 1 with icon stop'
+if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 22 && minor >= 13) || major > 22 ? 0 : 1)'; then
+  osascript -e 'display dialog "当前 Node.js 版本不受支持。请使用 22.13 或更高版本。\\n\\nThe installed Node.js version is unsupported. Use Node.js 22.13 or newer." buttons {"确定 / OK"} default button 1 with icon stop'
   exit 1
 fi
 

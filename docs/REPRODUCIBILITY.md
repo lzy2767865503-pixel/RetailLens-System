@@ -15,7 +15,8 @@ OpenAI credentials.
 
 ## 1. Reference environment / 参考环境
 
-- Node.js: `^20.19.0 || >=22.12.0` (reference runtime: `.nvmrc`)
+- Node.js: `>=22.13.0` (tested reference runtime: Node.js `24.16.0`
+  in `.nvmrc`)
 - Package manager: `pnpm 11.9.0`
 - Lock file: `pnpm-lock.yaml`
 - Supported user interface languages: Simplified Chinese and English only
