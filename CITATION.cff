@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use RetailLens, please cite this software."
+title: "RetailLens: Bilingual Retail Business Assessment System"
+type: software
+authors:
+  - family-names: "LAI"
+    given-names: "ZEYU"
+    alias: "lzy2767865503-pixel"
+version: 1.0.0
+date-released: 2026-07-27
+license: MIT
+repository-code: "https://github.com/lzy2767865503-pixel/RetailLens-System"
+url: "https://github.com/lzy2767865503-pixel/RetailLens-System"
+keywords:
+  - retail business analysis
+  - strategy
+  - bilingual software
+  - decision support
