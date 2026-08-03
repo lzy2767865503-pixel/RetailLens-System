@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -25,16 +25,11 @@ import {
   type AppSection
 } from "./components/AppHeader";
 import { ApiSettingsDialog } from "./components/ApiSettingsDialog";
-import { ExecutiveConsultingView } from "./components/ExecutiveConsultingView";
-import { EnterpriseTheoryView } from "./components/EnterpriseTheoryView";
 import {
   createEmptyDraft,
   IntakeWizard,
   type RetailIntakeDraft
 } from "./components/IntakeWizard";
-import { MethodologyView } from "./components/MethodologyView";
-import { ReportView } from "./components/ReportView";
-import { StrategyMatrices } from "./components/StrategyMatrices";
 import {
   BusinessInputSchema,
   buildConsultingAssessment,
@@ -51,6 +46,32 @@ import {
 } from "./hooks/useApiSettings";
 import { usePersistentDraft } from "./hooks/usePersistentDraft";
 import type { Locale } from "./i18n";
+
+const ExecutiveConsultingView = lazy(() =>
+  import("./components/ExecutiveConsultingView").then((module) => ({
+    default: module.ExecutiveConsultingView
+  }))
+);
+const EnterpriseTheoryView = lazy(() =>
+  import("./components/EnterpriseTheoryView").then((module) => ({
+    default: module.EnterpriseTheoryView
+  }))
+);
+const MethodologyView = lazy(() =>
+  import("./components/MethodologyView").then((module) => ({
+    default: module.MethodologyView
+  }))
+);
+const ReportView = lazy(() =>
+  import("./components/ReportView").then((module) => ({
+    default: module.ReportView
+  }))
+);
+const StrategyMatrices = lazy(() =>
+  import("./components/StrategyMatrices").then((module) => ({
+    default: module.StrategyMatrices
+  }))
+);
 
 const DRAFT_KEY = "retaillens.business-draft";
 const DRAFT_VERSION = 2;
@@ -307,49 +328,57 @@ export default function App() {
         />
       )}
 
-      {activeSection === "reports" &&
-        (report &&
-        input &&
-        score &&
-        consultingAssessment &&
-        enterpriseTheoryAssessment ? (
-          <ReportView
-            locale={locale}
-            report={report}
-            ai={ai}
-            aiLoading={submitting}
-            executiveContent={
-              <ExecutiveConsultingView
-                locale={locale}
-                assessment={consultingAssessment}
-              />
-            }
-            theoryContent={
-              <EnterpriseTheoryView
-                locale={locale}
-                assessment={enterpriseTheoryAssessment}
-              />
-            }
-            matrixContent={
-              <StrategyMatrices
-                locale={locale}
-                data={businessToStrategyData(input, score)}
-              />
-            }
-            onRetryAi={retryAi}
-            onEdit={() => setActiveSection("assessment")}
-            onOpenMethodology={() => setActiveSection("methodology")}
-          />
-        ) : (
-          <EmptyReport
-            locale={locale}
-            onStart={() => setActiveSection("assessment")}
-          />
-        ))}
+      <Suspense
+        fallback={
+          <main className="page-loading" role="status">
+            {isZh ? "正在载入分析模块…" : "Loading analysis module…"}
+          </main>
+        }
+      >
+        {activeSection === "reports" &&
+          (report &&
+          input &&
+          score &&
+          consultingAssessment &&
+          enterpriseTheoryAssessment ? (
+            <ReportView
+              locale={locale}
+              report={report}
+              ai={ai}
+              aiLoading={submitting}
+              executiveContent={
+                <ExecutiveConsultingView
+                  locale={locale}
+                  assessment={consultingAssessment}
+                />
+              }
+              theoryContent={
+                <EnterpriseTheoryView
+                  locale={locale}
+                  assessment={enterpriseTheoryAssessment}
+                />
+              }
+              matrixContent={
+                <StrategyMatrices
+                  locale={locale}
+                  data={businessToStrategyData(input, score)}
+                />
+              }
+              onRetryAi={retryAi}
+              onEdit={() => setActiveSection("assessment")}
+              onOpenMethodology={() => setActiveSection("methodology")}
+            />
+          ) : (
+            <EmptyReport
+              locale={locale}
+              onStart={() => setActiveSection("assessment")}
+            />
+          ))}
 
-      {activeSection === "methodology" && (
-        <MethodologyView locale={locale} />
-      )}
+        {activeSection === "methodology" && (
+          <MethodologyView locale={locale} />
+        )}
+      </Suspense>
 
       <footer className="app-authorship">
         <span>RetailLens 1.0</span>
