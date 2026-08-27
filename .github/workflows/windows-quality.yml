@@ -94,6 +94,7 @@ jobs:
           Copy-Item -LiteralPath $archive[0].FullName -Destination $candidateDirectory
           $hash = (Get-FileHash $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $($archive[0].Name)" | Set-Content (Join-Path $candidateDirectory 'SHA256SUMS.txt')
+          Write-Host "Frozen internal candidate SHA-256: $hash"
           'INTERNAL NON-RELEASE PAYLOAD - MAY CONTAIN UNSIGNED OR THIRD-PARTY-SIGNED PE FILES - NEVER UPLOADED OR PUBLISHED' |
             Set-Content (Join-Path $candidateDirectory 'UNSIGNED-DO-NOT-PUBLISH.txt')
 

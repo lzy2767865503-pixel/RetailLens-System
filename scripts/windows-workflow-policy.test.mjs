@@ -382,9 +382,11 @@ describe("fail-closed Windows workflow source policy", () => {
     const process = read("scripts/windows-process.ps1");
     expect(workflow).not.toContain("actions/upload-artifact");
     expect(workflow.match(/\$PSNativeCommandUseErrorActionPreference = \$true/g)).toHaveLength(5);
+    expect(workflow).toContain("Frozen internal candidate SHA-256: $hash");
     expect(workflow).toContain("Remove-Item -LiteralPath $candidateRoot -Recurse -Force");
     expect(workflow).toContain("No Windows binary or evidence artifact is uploaded");
     expect(round2).toContain("Portable-directory installation");
+    expect(round2).toContain("Verified frozen internal candidate SHA-256: $candidateHash");
     expect(round2).toContain("Portable-directory uninstall");
     expect(round2).toContain("TimeoutSeconds");
     expect(round2).toContain("$portableReadinessSchemaVersion = 2");

@@ -137,6 +137,7 @@ if (
 ) { throw "SHA256SUMS.txt does not bind one exact portable-directory ZIP." }
 $candidateHash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($candidateHash -cne $Matches[1]) { throw "Portable-directory ZIP SHA-256 mismatch." }
+Write-Host "Verified frozen internal candidate SHA-256: $candidateHash"
 
 if ($RequireAuthenticode) {
   if ([string]::IsNullOrWhiteSpace($ExpectedSignerSubject)) {
