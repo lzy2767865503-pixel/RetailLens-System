@@ -8,7 +8,7 @@ const projectRoot = path.resolve(
   ".."
 );
 const read = (relativePath) =>
-  readFileSync(path.join(projectRoot, relativePath), "utf8");
+  readFileSync(path.join(projectRoot, relativePath), "utf8").replaceAll("\r\n", "\n");
 
 describe("fail-closed Windows workflow source policy", () => {
   it("never enables the isolated self-signed fixture allowance in production workflows", () => {
@@ -381,6 +381,7 @@ describe("fail-closed Windows workflow source policy", () => {
     const storeLifecycle = read("scripts/windows-store-lifecycle.ps1");
     const process = read("scripts/windows-process.ps1");
     expect(workflow).not.toContain("actions/upload-artifact");
+    expect(workflow.match(/\$PSNativeCommandUseErrorActionPreference = \$true/g)).toHaveLength(5);
     expect(workflow).toContain("Remove-Item -LiteralPath $candidateRoot -Recurse -Force");
     expect(workflow).toContain("No Windows binary or evidence artifact is uploaded");
     expect(round2).toContain("Portable-directory installation");

@@ -37,7 +37,10 @@ jobs:
 
       - name: Round 1 - locked install, audits, tests, and metadata gates
         timeout-minutes: 15
+        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           pnpm install --frozen-lockfile
           pnpm audit:prod
           pnpm audit:all
@@ -50,6 +53,8 @@ jobs:
         timeout-minutes: 5
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           ./scripts/windows-signer-policy.test.ps1
           ./scripts/windows-no-checkout-signer-policy.test.ps1
           ./scripts/windows-file-policy.test.ps1
@@ -69,6 +74,8 @@ jobs:
         timeout-minutes: 15
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           pnpm package:windows
           ./scripts/windows-create-portable-release.ps1 `
             -PayloadDirectory ./release/windows/win-unpacked `
@@ -94,6 +101,8 @@ jobs:
         timeout-minutes: 15
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           if (Test-Path -LiteralPath node_modules) { Remove-Item -LiteralPath node_modules -Recurse -Force }
           pnpm install --frozen-lockfile
           pnpm audit:prod
@@ -107,6 +116,8 @@ jobs:
         timeout-minutes: 5
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           ./scripts/windows-signer-policy.test.ps1
           ./scripts/windows-no-checkout-signer-policy.test.ps1
           ./scripts/windows-file-policy.test.ps1
