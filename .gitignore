@@ -1,5 +1,7 @@
 node_modules/
 dist/
+dist-electron/
+release/
 .DS_Store
 *.log
 .env
@@ -13,6 +15,8 @@ dist/
 *.key
 *.p12
 *.pfx
+docs/CERTIFICATION_NOTES.md
+docs/CERTIFICATION_NOTES.private.*
 coverage/
 playwright-report/
 test-results/

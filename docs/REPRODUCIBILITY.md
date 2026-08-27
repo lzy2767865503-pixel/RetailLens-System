@@ -1,6 +1,6 @@
 # RetailLens reproducibility protocol / RetailLens 复刻协议
 
-Version / 版本：1.0.0
+Version / 版本：1.1.0
 
 Author / 作者：LAI ZEYU
 
@@ -23,7 +23,8 @@ OpenAI credentials.
 - Operating systems: macOS, Linux, or Windows with a supported Node.js runtime
 
 The Finder launcher is macOS-specific. The command-line workflow works across
-the supported operating systems.
+the supported operating systems. Windows installer and Store validation use the
+separate release protocol in `docs/WINDOWS_RELEASE.md`.
 
 Finder 启动器仅适用于 macOS；命令行流程可用于上述支持 Node.js 的操作系统。
 
@@ -46,10 +47,11 @@ Open `http://127.0.0.1:8787`.
 
 1. `pnpm install --frozen-lockfile` completes without modifying
    `pnpm-lock.yaml`.
-2. `pnpm test` reports four passing test files and 50 passing tests.
-3. `pnpm build` completes TypeScript checking and creates `dist/`.
-4. `GET http://127.0.0.1:8787/api/health` returns `status: "ok"`,
-   `languages: ["zh", "en"]`, and
+2. `pnpm test` reports 11 passing test files and 81 passing tests.
+3. `pnpm build` completes TypeScript checking and creates `dist/` and
+   `dist-electron/`.
+4. `GET http://127.0.0.1:8787/api/health` returns `status: "ok"`, a positive
+   integer `processId` for the serving process, `languages: ["zh", "en"]`, and
    `ai.clientManagedKeysSupported: true`.
 5. **Load demo / 加载演示** completes all nine intake steps.
 6. The demonstration route reports 199/199 visible fields, including 91
@@ -62,6 +64,8 @@ Open `http://127.0.0.1:8787`.
    - evidence, gate, scenario, KPI, and 30/60/90-day action workpapers.
 8. Switching between Chinese and English does not change the deterministic
    result.
+9. `pnpm test:desktop` launches Electron, verifies renderer isolation, creates
+   the synthetic 74.3 report, and clears local business data.
 
 The synthetic demonstration result may display a locked score of 74.3 and a
 Conditional Proceed management call. These are test-fixture outputs, not a

@@ -1,0 +1,142 @@
+name: Windows quality gates
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  two-round-windows-quality:
+    name: Two rounds on one controlled runner - no artifact upload
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Check out without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: pnpm
+
+      - name: Round 1 - locked install, audits, tests, and metadata gates
+        timeout-minutes: 15
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm audit:prod
+          pnpm audit:all
+          pnpm test
+          pnpm metadata:attribution
+          pnpm metadata:notices:check
+          pnpm metadata:sbom
+
+      - name: Round 1 - Windows static policy gates
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          ./scripts/windows-signer-policy.test.ps1
+          ./scripts/windows-file-policy.test.ps1
+          ./scripts/windows-wack-policy.test.ps1
+          ./scripts/windows-workflow-powershell-ast.test.ps1
+
+      - name: Round 1 - real signed staging policy
+        timeout-minutes: 1
+        shell: pwsh
+        run: ./scripts/windows-staging-policy.test.ps1
+
+      - name: Round 1 - real Electron lifecycle
+        timeout-minutes: 5
+        run: pnpm test:desktop
+
+      - name: Round 1 - package and freeze one internal portable-directory candidate
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          pnpm package:windows
+          ./scripts/windows-create-portable-release.ps1 `
+            -PayloadDirectory ./release/windows/win-unpacked `
+            -OutputDirectory ./release/windows
+          . ./scripts/windows-file-policy.ps1
+          $primary = Get-Item 'release/windows/win-unpacked/Retail Decision Studio by LAI ZEYU.exe'
+          ./scripts/windows-verify-pe-metadata.ps1 -ExecutablePath @($primary.FullName)
+          if (@(Get-RetailLensPortableExecutable -Root release/windows/win-unpacked).Count -eq 0) {
+            throw 'Internal portable-directory build contains no real PE'
+          }
+          $archive = @(Get-ChildItem release/windows -File -Filter '*-portable-directory.zip')
+          if ($archive.Count -ne 1) { throw 'Expected one internal portable-directory ZIP' }
+          $candidateDirectory = Join-Path $PWD 'round-1-candidate'
+          if (Test-Path -LiteralPath $candidateDirectory) { throw 'Internal candidate directory pre-exists' }
+          New-Item -ItemType Directory -Path $candidateDirectory | Out-Null
+          Copy-Item -LiteralPath $archive[0].FullName -Destination $candidateDirectory
+          $hash = (Get-FileHash $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($archive[0].Name)" | Set-Content (Join-Path $candidateDirectory 'SHA256SUMS.txt')
+          'INTERNAL NON-RELEASE PAYLOAD - MAY CONTAIN UNSIGNED OR THIRD-PARTY-SIGNED PE FILES - NEVER UPLOADED OR PUBLISHED' |
+            Set-Content (Join-Path $candidateDirectory 'UNSIGNED-DO-NOT-PUBLISH.txt')
+
+      - name: Round 2 - recreate locked install, audits, tests, and metadata gates
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath node_modules) { Remove-Item -LiteralPath node_modules -Recurse -Force }
+          pnpm install --frozen-lockfile
+          pnpm audit:prod
+          pnpm audit:all
+          pnpm test
+          pnpm metadata:attribution
+          pnpm metadata:notices:check
+          pnpm metadata:sbom
+
+      - name: Round 2 - Windows static policy gates
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          ./scripts/windows-signer-policy.test.ps1
+          ./scripts/windows-file-policy.test.ps1
+          ./scripts/windows-wack-policy.test.ps1
+          ./scripts/windows-workflow-powershell-ast.test.ps1
+
+      - name: Round 2 - real signed staging policy
+        timeout-minutes: 1
+        shell: pwsh
+        run: ./scripts/windows-staging-policy.test.ps1
+
+      - name: Round 2 - real Electron lifecycle
+        timeout-minutes: 5
+        run: pnpm test:desktop
+
+      - name: Round 2 - verify frozen bytes and bounded portable lifecycle
+        timeout-minutes: 10
+        shell: pwsh
+        run: ./scripts/windows-round2.ps1 -ArtifactDirectory ./round-1-candidate
+
+      - name: Destroy every internal unsigned candidate without uploading evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $errors = [System.Collections.Generic.List[string]]::new()
+          foreach ($candidateRoot in @('round-1-candidate', 'release/windows')) {
+            try {
+              if (Test-Path -LiteralPath $candidateRoot) { Remove-Item -LiteralPath $candidateRoot -Recurse -Force }
+            } catch { $errors.Add("${candidateRoot}: $($_.Exception.Message)") }
+          }
+          foreach ($candidateRoot in @('round-1-candidate', 'release/windows')) {
+            if (Test-Path -LiteralPath $candidateRoot) { $errors.Add("${candidateRoot}: remained after cleanup") }
+          }
+          if ($errors.Count -ne 0) { throw "Unsigned candidate cleanup failed: $($errors -join ' | ')" }
+          'No Windows binary or evidence artifact is uploaded by this workflow.' | Out-File $env:GITHUB_STEP_SUMMARY -Append

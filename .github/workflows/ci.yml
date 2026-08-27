@@ -35,5 +35,8 @@ jobs:
       - name: Run automated tests
         run: pnpm test
 
+      - name: Verify bilingual authorship attribution
+        run: pnpm metadata:attribution
+
       - name: Build production application
         run: pnpm build

@@ -1,0 +1,93 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildStoreUiReadyEvidence,
+  parseStoreUiProbe,
+  rendererDomProofFailures,
+  WINDOWS_AUTHOR_NAME,
+  WINDOWS_PRODUCT_NAME
+} from "./readiness";
+
+const validDom = {
+  rootContentLength: 500,
+  titleMatches: true,
+  productNameVisible: true,
+  authorVisible: true,
+  privacyEntryVisible: true
+};
+
+const validProbe = {
+  schemaVersion: 1 as const,
+  candidateSha256: "a".repeat(64),
+  nonce: "123e4567-e89b-42d3-a456-426614174000",
+  version: "1.1.0"
+};
+
+describe("packaged renderer readiness policy", () => {
+  it("requires React content, product, author, title, and privacy entry", () => {
+    expect(rendererDomProofFailures(validDom)).toEqual([]);
+    expect(
+      rendererDomProofFailures({
+        ...validDom,
+        rootContentLength: 0,
+        authorVisible: false,
+        privacyEntryVisible: false
+      })
+    ).toEqual([
+      "React root content is missing or too short",
+      "visible LAI ZEYU（来泽宇） authorship is missing",
+      "About & privacy entry is missing"
+    ]);
+  });
+
+  it("accepts only a strict version-bound candidate probe", () => {
+    expect(parseStoreUiProbe(validProbe, "1.1.0")).toEqual(validProbe);
+    expect(() =>
+      parseStoreUiProbe(
+        { ...validProbe, candidateSha256: "not-a-hash" },
+        "1.1.0"
+      )
+    ).toThrow(/SHA-256/);
+    expect(() =>
+      parseStoreUiProbe(
+        { ...validProbe, version: "1.1.1" },
+        "1.1.0"
+      )
+    ).toThrow(/version/);
+    expect(() =>
+      parseStoreUiProbe(
+        { ...validProbe, extra: "forbidden" },
+        "1.1.0"
+      )
+    ).toThrow(/unexpected fields/);
+  });
+
+  it("emits author-owned evidence only after every DOM assertion passes", () => {
+    const evidence = buildStoreUiReadyEvidence(
+      validProbe,
+      validDom,
+      47824,
+      "2026-08-27T00:00:00.000Z"
+    );
+    expect(evidence).toMatchObject({
+      product: WINDOWS_PRODUCT_NAME,
+      author: WINDOWS_AUTHOR_NAME,
+      candidateSha256: validProbe.candidateSha256,
+      nonce: validProbe.nonce,
+      processId: 47824,
+      dom: validDom
+    });
+    expect(() =>
+      buildStoreUiReadyEvidence(
+        validProbe,
+        {
+          ...validDom,
+          productNameVisible: false
+        },
+        47824
+      )
+    ).toThrow(/visible product name is missing/);
+    expect(() =>
+      buildStoreUiReadyEvidence(validProbe, validDom, 0)
+    ).toThrow(/process ID/);
+  });
+});

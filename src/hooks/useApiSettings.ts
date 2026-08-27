@@ -1,27 +1,32 @@
 import { useCallback, useState } from "react";
+import { RETAILLENS_OPENAI_SETTINGS_STORAGE_KEY } from "../storage";
 
-export const DEFAULT_OPENAI_MODEL = "gpt-5.6-sol" as const;
+// Keep the selectable list limited to model IDs published in the official
+// OpenAI API model catalogue. Store certification still performs a live
+// /v1/models lookup and a structured Responses API round trip for the exact
+// repository-variable-selected model before a candidate may pass.
+export const DEFAULT_OPENAI_MODEL = "gpt-5" as const;
 
 export const OPENAI_MODEL_OPTIONS = [
   {
     value: DEFAULT_OPENAI_MODEL,
     label: {
-      zh: "GPT-5.6 Sol（推荐）",
-      en: "GPT-5.6 Sol (recommended)"
+      zh: "GPT-5（推荐）",
+      en: "GPT-5 (recommended)"
     }
   },
   {
-    value: "gpt-5.6-terra",
+    value: "gpt-5-mini",
     label: {
-      zh: "GPT-5.6 Terra（性能与成本均衡）",
-      en: "GPT-5.6 Terra (balanced)"
+      zh: "GPT-5 mini（性能与成本均衡）",
+      en: "GPT-5 mini (balanced)"
     }
   },
   {
-    value: "gpt-5.6-luna",
+    value: "gpt-5-nano",
     label: {
-      zh: "GPT-5.6 Luna（高效低成本）",
-      en: "GPT-5.6 Luna (efficient)"
+      zh: "GPT-5 nano（高效低成本）",
+      en: "GPT-5 nano (efficient)"
     }
   }
 ] as const;
@@ -47,7 +52,7 @@ interface StoredApiSettingsV1 {
   model: OpenAIModel;
 }
 
-const STORAGE_KEY = "retaillens.openai-settings";
+const STORAGE_KEY = RETAILLENS_OPENAI_SETTINGS_STORAGE_KEY;
 const STORAGE_VERSION = 1;
 const OPENAI_MODEL_VALUES = new Set<string>(
   OPENAI_MODEL_OPTIONS.map(({ value }) => value)

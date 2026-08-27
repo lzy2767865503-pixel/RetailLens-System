@@ -3,7 +3,7 @@
 [![CI](https://github.com/lzy2767865503-pixel/RetailLens-System/actions/workflows/ci.yml/badge.svg)](https://github.com/lzy2767865503-pixel/RetailLens-System/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-0F766E.svg)](LICENSE)
 
-**Author / 作者： [LAI ZEYU](https://github.com/lzy2767865503-pixel)**
+**Author / 作者： [LAI ZEYU（来泽宇）](https://github.com/lzy2767865503-pixel)**
 
 RetailLens is a bilingual, evidence-led retail business assessment system developed from a private course corpus covering retail management, strategic management, global marketing, and international business. The public repository includes the executable methodology and source map, not the copyrighted course files.
 
@@ -59,9 +59,9 @@ pnpm build
 pnpm start
 ```
 
-Open `http://127.0.0.1:8787`, select **Load demo / 加载演示**, and generate the assessment. A correct clean reproduction passes 50 tests, completes the production build, and loads the nine-step bilingual assessment. See [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md) for the exact verification checklist.
+Open `http://127.0.0.1:8787`, select **Load demo / 加载演示**, and generate the assessment. A correct clean reproduction passes 81 unit/API/security/release-policy tests, completes the renderer and Electron-main production build, and loads the nine-step bilingual assessment. See [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md) for the exact verification checklist.
 
-打开 `http://127.0.0.1:8787`，选择 **加载演示 / Load demo**，然后生成评估。正确的干净复刻应通过 50 项测试、完成生产构建，并显示九步双语评估。完整核验清单见 [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md)。
+打开 `http://127.0.0.1:8787`，选择 **加载演示 / Load demo**，然后生成评估。正确的干净复刻应通过 81 项单元/API/安全/发布策略测试、完成前端与 Electron 主进程构建，并显示九步双语评估。完整核验清单见 [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md)。
 
 ## One-click use / 一键使用
 
@@ -96,6 +96,69 @@ Local development uses `http://127.0.0.1:5173`; the production build uses `http:
 
 本地开发地址为 `http://127.0.0.1:5173`；生产构建地址为 `http://127.0.0.1:8787`。
 
+## Windows desktop / Windows 桌面版
+
+The public Windows product name is **Retail Decision Studio by LAI ZEYU**. It
+is built from this RetailLens open-source repository; RetailLens remains the
+internal project and methodology name. No Microsoft Store publication or
+certification is claimed until Partner Center confirms it.
+
+公开 Windows 产品名称为 **Retail Decision Studio by LAI ZEYU**。该产品基于本
+RetailLens 开源仓库构建；RetailLens 继续作为内部项目与方法名称。在 Partner Center
+正式确认前，本仓库不宣称已通过 Microsoft Store 认证或已经公开上架。
+
+```bash
+pnpm test:desktop
+pnpm metadata:attribution
+pnpm metadata:notices:check
+pnpm metadata:sbom
+pnpm package:windows
+```
+
+`package:windows` creates one unsigned unpacked x64 Electron directory for
+internal Windows quality testing. The public GitHub format is an auditable
+portable-directory ZIP, not an NSIS or self-extracting EXE container.
+Microsoft Store AppX packaging requires exact Partner Center identity values
+in build environment variables; see [docs/WINDOWS_RELEASE.md](docs/WINDOWS_RELEASE.md).
+The ordinary quality workflow keeps every internal non-release PE and ZIP inside
+one Windows job, verifies the same frozen archive twice, deletes the complete
+candidate roots, rejects disguised PE/archive evidence by real PE/ZIP magic,
+and uploads no Windows binary or evidence artifact. The Store workflow likewise
+uploads neither its AppX nor its private WACK run records to GitHub Actions.
+Public GitHub publication uses the
+official SSL.com eSigner Cloud Key Adapter: the author-owned certificate remains
+in the cloud HSM, CKA exposes it through Windows CNG/KSP, and Windows SignTool
+signs every real PE discovered in the unpacked directory. No PFX is exported,
+stored, or passed to electron-builder. Every PE in the final ZIP must have a
+trusted RFC 3161 timestamp, a trusted online-revocation chain, and an exact signer
+SimpleName and Subject CN of `LAI ZEYU` or `来泽宇`; any unsigned or third-party-
+signed PE blocks staging. Two independent Windows lifecycle rounds extract,
+byte-copy-install, prove the real DOM plus exact executable/PID/listener binding,
+run the packaged smoke gate, and perform bounded removal before a draft release
+is redownloaded, hash-checked, and made public.
+
+Microsoft Store WACK runs only on a specifically labelled, elevated,
+active-interactive self-hosted Windows runner. The exact model selected through
+the protected repository variable must also pass two live `/v1/models/{model}`
+lookups and two strict structured `/v1/responses` round trips bound to the same
+commit/model/candidate with independent nonces and response IDs. WACK runs twice
+on the unchanged temporary-signed AppX; its local JSON is explicitly private,
+non-cryptographic, and non-transferable. Without the dedicated key or labelled
+runner, the Store workflow is deliberately blocked.
+
+The desktop shell embeds the existing Express API at the stable, loopback-only
+origin `http://127.0.0.1:47824`, so its local application storage survives a
+real restart. The desktop origin receives exact Host, Origin, and Fetch Metadata
+checks; the command-line loopback server also rejects every non-loopback Host,
+preventing DNS-rebinding. Renderer Node integration is disabled, context
+isolation and sandboxing are enabled, permissions and non-local navigation are
+denied, production DevTools are disabled, and the Windows executable uses
+hardened Electron fuses. Packaged smoke tests require real React-root content,
+the visible product and bilingual author, and the About/privacy entry; API
+health alone cannot pass. Use **About & privacy → Clear local data** to remove
+the saved business draft and model preference and clear the in-memory API key
+and current report state.
+
 ## Repository map / 仓库结构
 
 | Path / 路径 | Purpose / 用途 |
@@ -103,10 +166,14 @@ Local development uses `http://127.0.0.1:5173`; the production build uses `http:
 | `src/domain/` | Deterministic scoring, consulting, matrix, and enterprise-theory engines / 确定性评分、咨询、矩阵与企业理论引擎 |
 | `src/components/` | Chinese/English intake and report interface / 中英文输入与报告界面 |
 | `server/` | Local Express API and optional OpenAI integration / 本地 Express API 与可选 OpenAI 接入 |
+| `electron/` | Hardened desktop process and security policy / 加固桌面主进程与安全策略 |
 | `docs/METHODOLOGY.md` | Formulas, weights, decision gates, evidence rules, and limitations / 公式、权重、决策门槛、证据规则与限制 |
 | `docs/SOURCE_MAP.md` | Course-framework provenance without copyrighted source files / 不包含受版权保护原文件的课程框架来源映射 |
 | `docs/REPRODUCIBILITY.md` | Clean-clone reproduction and verification protocol / 干净克隆复刻与验收协议 |
+| `docs/PRIVACY.md` | Windows privacy statement / Windows 隐私声明 |
+| `docs/WINDOWS_RELEASE.md` | Windows, AppX, WACK, and release gates / Windows、AppX、WACK 与发布门禁 |
 | `.github/workflows/ci.yml` | Automated clean install, test, and build / 自动化干净安装、测试与构建 |
+| `.github/workflows/windows-quality.yml` | Two-round Windows build/install gates / 两轮 Windows 构建与安装门禁 |
 
 ## Privacy and limits / 隐私与限制
 
@@ -134,6 +201,6 @@ See [docs/METHODOLOGY.md](docs/METHODOLOGY.md) and [docs/SOURCE_MAP.md](docs/SOU
 
 ## Authorship and license / 作者与许可证
 
-RetailLens was designed and authored by **LAI ZEYU**. Source code and original project documentation in this repository are released under the [MIT License](LICENSE). Course materials, third-party trademarks, and third-party reference content remain the property of their respective owners and are not redistributed.
+RetailLens was designed and authored by **LAI ZEYU（来泽宇）**. Source code and original project documentation in this repository are released under the [MIT License](LICENSE). Course materials, third-party trademarks, and third-party reference content remain the property of their respective owners and are not redistributed.
 
-RetailLens 由 **LAI ZEYU** 设计并署名。本仓库原创源代码及项目文档按 [MIT License](LICENSE) 发布。课程资料、第三方商标及第三方参考内容仍归各自权利人所有，本仓库不对其进行再分发。
+RetailLens 由 **LAI ZEYU（来泽宇）** 设计并署名。本仓库原创源代码及项目文档按 [MIT License](LICENSE) 发布。课程资料、第三方商标及第三方参考内容仍归各自权利人所有，本仓库不对其进行再分发。

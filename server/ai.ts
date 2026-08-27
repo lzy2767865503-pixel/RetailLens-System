@@ -6,7 +6,7 @@ import {
   type SupportedLanguage
 } from "./schemas";
 
-export const DEFAULT_OPENAI_MODEL = "gpt-5.6-sol";
+export const DEFAULT_OPENAI_MODEL = "gpt-5";
 
 const API_KEY_PATTERN = /^sk-[A-Za-z0-9_-]{20,240}$/;
 const MODEL_PATTERN =

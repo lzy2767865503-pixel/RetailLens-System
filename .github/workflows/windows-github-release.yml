@@ -1,0 +1,818 @@
+name: Publish trusted Windows portable directory to GitHub
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable version tag on the current protected main commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retaillens-trusted-windows-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build_sign_round_1:
+    name: Protected-main build/sign plus two controlled exact-candidate rounds
+    if: github.repository_owner == 'lzy2767865503-pixel' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 150
+    environment: github-release
+    permissions:
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.release_identity.outputs.commit_sha }}
+      candidate_sha256: ${{ steps.candidate.outputs.candidate_sha256 }}
+      signer_thumbprint: ${{ steps.esigner.outputs.signer_thumbprint }}
+      openai_model: ${{ steps.openai_round_1.outputs.model }}
+      openai_nonce_sha256: ${{ steps.openai_round_1.outputs.nonce_sha256 }}
+      openai_response_id_sha256: ${{ steps.openai_round_1.outputs.response_id_sha256 }}
+      openai_completed_at: ${{ steps.openai_round_1.outputs.completed_at }}
+      transfer_artifact_id: ${{ steps.transfer_candidate.outputs.artifact-id }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      RETAILLENS_WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_SIGNER_SUBJECT }}
+      RETAILLENS_WINDOWS_TIMESTAMP_URL: http://ts.ssl.com
+      RETAILLENS_CERTIFICATION_OPENAI_MODEL: ${{ vars.RETAILLENS_CERTIFICATION_OPENAI_MODEL }}
+      ESIGNER_CKA_VERSION: 1.0.6
+      ESIGNER_CKA_SHA256: e4971440e4ebed94328492cf36e18999554c5c657c856f1cb14a6072c8b1c263
+
+    steps:
+      - name: Check out protected main without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require canonical owner and exact immutable tag on current remote main
+        id: release_identity
+        shell: pwsh
+        run: |
+          if ('${{ github.repository }}' -cne 'lzy2767865503-pixel/RetailLens-System') {
+            throw 'Trusted release is restricted to the canonical repository'
+          }
+          git fetch --force origin '+refs/heads/main:refs/remotes/origin/main' '+refs/tags/*:refs/tags/*'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch current remote main and tags' }
+          $headCommit = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          $remoteMain = (git rev-parse refs/remotes/origin/main).Trim().ToLowerInvariant()
+          if ($headCommit -cne $remoteMain -or $headCommit -cne '${{ github.sha }}'.ToLowerInvariant()) {
+            throw 'Workflow checkout is not the exact current remote main commit'
+          }
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw 'Release tag format is invalid'
+          }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -cne "v$version") { throw 'Release tag does not exactly match package version' }
+          $tagCommit = (git rev-list -n 1 $env:RELEASE_TAG).Trim().ToLowerInvariant()
+          if (-not $tagCommit -or $tagCommit -cne $remoteMain) {
+            throw 'Release tag must peel to the exact current protected main commit'
+          }
+          "commit_sha=$remoteMain" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: pnpm
+
+      - name: Install locked dependencies and run complete Round 1 gates
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm audit:prod
+          pnpm audit:all
+          pnpm test
+          pnpm metadata:attribution
+          pnpm metadata:notices:check
+          pnpm metadata:sbom
+          ./scripts/windows-signer-policy.test.ps1
+          ./scripts/windows-file-policy.test.ps1
+          ./scripts/windows-staging-policy.test.ps1
+          ./scripts/windows-wack-policy.test.ps1
+          ./scripts/windows-workflow-powershell-ast.test.ps1
+          pnpm test:desktop
+
+      - name: Build one unpacked Windows payload without an EXE container
+        run: pnpm package:windows
+
+      - name: Install and load pinned SSL.com eSigner Cloud Key Adapter
+        id: esigner
+        shell: pwsh
+        env:
+          ESIGNER_USERNAME: ${{ secrets.ESIGNER_CKA_USERNAME }}
+          ESIGNER_PASSWORD: ${{ secrets.ESIGNER_CKA_PASSWORD }}
+          ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_CKA_TOTP_SECRET }}
+        run: |
+          foreach ($secret in @(
+            @{ Name = 'ESIGNER_CKA_USERNAME'; Value = $env:ESIGNER_USERNAME },
+            @{ Name = 'ESIGNER_CKA_PASSWORD'; Value = $env:ESIGNER_PASSWORD },
+            @{ Name = 'ESIGNER_CKA_TOTP_SECRET'; Value = $env:ESIGNER_TOTP_SECRET }
+          )) {
+            if ([string]::IsNullOrWhiteSpace($secret.Value)) { throw "$($secret.Name) is missing" }
+            Write-Output "::add-mask::$($secret.Value)"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:RETAILLENS_WINDOWS_SIGNER_SUBJECT)) {
+            throw 'WINDOWS_SIGNER_SUBJECT is missing'
+          }
+          . ./scripts/windows-process.ps1
+          if ($env:GITHUB_RUN_ID -notmatch '^\d+$' -or $env:GITHUB_RUN_ATTEMPT -notmatch '^\d+$') {
+            throw 'GitHub run identity is unavailable for run-owned eSigner paths'
+          }
+          $ckaSuffix = "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $ckaRoot = Join-Path $env:RUNNER_TEMP "retaillens-esigner-cka-$ckaSuffix"
+          $download = Join-Path $env:RUNNER_TEMP "SSL.COM-eSigner-CKA_$env:ESIGNER_CKA_VERSION-$ckaSuffix.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP "retaillens-esigner-download-$ckaSuffix"
+          $masterKey = Join-Path $ckaRoot 'master.key'
+          $ckaAppData = Join-Path $env:APPDATA 'eSignerCKA'
+          $preexistingCertificateState = Join-Path $env:RUNNER_TEMP "retaillens-esigner-preexisting-certificates-$ckaSuffix.json"
+          foreach ($path in @($ckaRoot, $download, $expanded, $ckaAppData)) {
+            if (Test-Path -LiteralPath $path) { throw "eSigner state unexpectedly pre-exists: $path" }
+          }
+          if (Test-Path -LiteralPath $preexistingCertificateState) {
+            throw 'eSigner pre-existing-certificate state unexpectedly exists'
+          }
+          $allPreexistingThumbprints = @(
+            Get-ChildItem 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\TrustedPeople' -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.Thumbprint.Replace(' ', '').ToUpperInvariant() }
+          ) | Sort-Object -Unique
+          $preexistingSignerThumbprints = @(
+            Get-ChildItem 'Cert:\CurrentUser\My', 'Cert:\CurrentUser\TrustedPeople' -ErrorAction SilentlyContinue |
+              Where-Object { $_.Subject -ceq $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT } |
+              ForEach-Object { $_.Thumbprint.Replace(' ', '').ToUpperInvariant() }
+          ) | Sort-Object -Unique
+          if ($preexistingSignerThumbprints.Count -ne 0) {
+            throw 'Clean hosted runner unexpectedly contains the configured signer certificate subject'
+          }
+          [ordered]@{
+            schemaVersion = 2
+            repository = $env:GITHUB_REPOSITORY
+            commitSha = $env:GITHUB_SHA.ToLowerInvariant()
+            workflowRunId = $env:GITHUB_RUN_ID
+            workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
+            signerSubject = $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT
+            thumbprints = @($allPreexistingThumbprints)
+          } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $preexistingCertificateState -Encoding utf8
+          $initialVariables = [ordered]@{
+            RETAILLENS_ESIGNER_CKA_HOME = $ckaRoot
+            RETAILLENS_ESIGNER_CKA_TOOL = (Join-Path $ckaRoot 'eSignerCKATool.exe')
+            RETAILLENS_ESIGNER_MASTER_KEY = $masterKey
+            RETAILLENS_ESIGNER_DOWNLOAD = $download
+            RETAILLENS_ESIGNER_EXPANDED = $expanded
+            RETAILLENS_ESIGNER_APPDATA_STATE = $ckaAppData
+            RETAILLENS_ESIGNER_PREEXISTING_CERT_STATE = $preexistingCertificateState
+          }
+          foreach ($entry in $initialVariables.GetEnumerator()) {
+            "$($entry.Key)=$($entry.Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          Invoke-WebRequest `
+            -Uri "https://github.com/SSLcom/eSignerCKA/releases/download/v$env:ESIGNER_CKA_VERSION/SSL.COM-eSigner-CKA_$env:ESIGNER_CKA_VERSION.zip" `
+            -OutFile $download
+          if ((Get-FileHash $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:ESIGNER_CKA_SHA256) {
+            throw 'Pinned SSL.com eSigner CKA archive hash mismatch'
+          }
+          Expand-Archive -LiteralPath $download -DestinationPath $expanded
+          $installers = @(Get-ChildItem -LiteralPath $expanded -File -Filter '*.exe')
+          if ($installers.Count -ne 1) { throw 'Expected one pinned eSigner CKA installer' }
+          New-Item -ItemType Directory -Path $ckaRoot | Out-Null
+          Invoke-RetailLensBoundedProcess `
+            -FilePath $installers[0].FullName `
+            -ArgumentList @('/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES', ('/DIR="' + $ckaRoot + '"')) `
+            -TimeoutSeconds 300 -Context 'Pinned eSigner CKA installation' | Out-Null
+          $ckaTool = Join-Path $ckaRoot 'eSignerCKATool.exe'
+          if (-not (Test-Path -LiteralPath $ckaTool -PathType Leaf)) { throw 'eSignerCKATool.exe was not installed' }
+          Invoke-RetailLensBoundedProcess `
+            -FilePath $ckaTool `
+            -ArgumentList @(
+              'config', '-mode', 'product', '-user', $env:ESIGNER_USERNAME,
+              '-pass', $env:ESIGNER_PASSWORD, '-totp', $env:ESIGNER_TOTP_SECRET,
+              '-key', ('"' + $masterKey + '"'), '-r'
+            ) `
+            -TimeoutSeconds 180 -SuppressOutput -Context 'eSigner CKA cloud-account configuration' | Out-Null
+          Invoke-RetailLensBoundedProcess -FilePath $ckaTool -ArgumentList @('unload') -TimeoutSeconds 60 -SuppressOutput -Context 'eSigner pre-load cleanup' | Out-Null
+          Invoke-RetailLensBoundedProcess -FilePath $ckaTool -ArgumentList @('load') -TimeoutSeconds 180 -SuppressOutput -Context 'eSigner certificate load' | Out-Null
+          $matches = @(
+            Get-ChildItem 'Cert:\CurrentUser\My' -CodeSigningCert |
+              Where-Object {
+                $_.Subject -ceq $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT -and
+                $_.HasPrivateKey -and $_.Subject -cne $_.Issuer
+              }
+          )
+          if ($matches.Count -ne 1) { throw 'Expected one exact trusted LAI ZEYU eSigner certificate' }
+          $certificate = $matches[0]
+          "RETAILLENS_ESIGNER_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETAILLENS_WINDOWS_SIGNER_THUMBPRINT=$($certificate.Thumbprint)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          . ./scripts/windows-signer-policy.ps1
+          Assert-RetailLensAuthorOwnedSignerIdentity `
+            -SimpleName $certificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) `
+            -Subject $certificate.Subject -Context 'loaded eSigner CKA certificate'
+          "signer_thumbprint=$($certificate.Thumbprint.ToLowerInvariant())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Cloud-sign every real PE, create ZIP, and verify one exact certificate
+        id: candidate
+        shell: pwsh
+        run: |
+          ./scripts/windows-sign-cloud.ps1 `
+            -PayloadRoot ./release/windows/win-unpacked `
+            -CertificateThumbprint $env:RETAILLENS_ESIGNER_CERT_THUMBPRINT `
+            -ExpectedSignerSubject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -TimestampUrl $env:RETAILLENS_WINDOWS_TIMESTAMP_URL `
+            -InventoryPath ./release/windows/PE-SIGNING-INVENTORY.json
+          ./scripts/windows-create-portable-release.ps1 `
+            -PayloadDirectory ./release/windows/win-unpacked `
+            -OutputDirectory ./release/windows
+          ./scripts/windows-verify-pe-metadata.ps1 `
+            -ExecutablePath @((Resolve-Path 'release/windows/win-unpacked/Retail Decision Studio by LAI ZEYU.exe').Path)
+          ./scripts/windows-verify-authenticode.ps1 `
+            -ArtifactDirectory ./release/windows `
+            -ExpectedSignerSubject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -ExpectedSignerThumbprint $env:RETAILLENS_ESIGNER_CERT_THUMBPRINT `
+            -InspectEmbeddedPayload
+          $archives = @(Get-ChildItem release/windows -File -Filter '*-portable-directory.zip')
+          if ($archives.Count -ne 1) { throw 'Expected exactly one signed portable-directory ZIP' }
+          $hash = (Get-FileHash $archives[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($archives[0].Name)" | Set-Content release/windows/SHA256SUMS.txt
+          "candidate_sha256=$hash" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Bind Round 1 live OpenAI capability to commit, model, and candidate
+        id: openai_round_1
+        shell: pwsh
+        env:
+          RETAILLENS_CERTIFICATION_OPENAI_API_KEY: ${{ secrets.RETAILLENS_CERTIFICATION_OPENAI_API_KEY }}
+          RETAILLENS_CERTIFICATION_COMMIT_SHA: ${{ steps.release_identity.outputs.commit_sha }}
+          RETAILLENS_CERTIFICATION_CANDIDATE_SHA256: ${{ steps.candidate.outputs.candidate_sha256 }}
+          RETAILLENS_CERTIFICATION_ROUND: "1"
+        run: |
+          $archive = @(Get-ChildItem release/windows -File -Filter '*-portable-directory.zip')
+          if (
+            $archive.Count -ne 1 -or
+            (Get-FileHash $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne '${{ steps.candidate.outputs.candidate_sha256 }}'
+          ) { throw 'Round 1 OpenAI preflight candidate bytes are not exact' }
+          $path = 'release/metadata/OPENAI_CERTIFICATION_ROUND_1.json'
+          node scripts/validate-openai-certification.mjs $path
+          $evidence = Get-Content $path -Raw | ConvertFrom-Json
+          if (
+            $evidence.schemaVersion -ne 2 -or
+            $evidence.commitSha -cne '${{ steps.release_identity.outputs.commit_sha }}' -or
+            $evidence.candidateSha256 -cne '${{ steps.candidate.outputs.candidate_sha256 }}' -or
+            $evidence.certificationRound -cne '1' -or
+            $evidence.model -cne $env:RETAILLENS_CERTIFICATION_OPENAI_MODEL -or
+            $evidence.nonceSha256 -notmatch '^[0-9a-f]{64}$' -or
+            $evidence.responseIdSha256 -notmatch '^[0-9a-f]{64}$'
+          ) { throw 'OpenAI Round 1 record is not exact and complete' }
+          $completedAt = [DateTimeOffset]$evidence.completedAt
+          if (
+            $completedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(2) -or
+            $completedAt -lt [DateTimeOffset]::UtcNow.AddMinutes(-2)
+          ) { throw 'OpenAI Round 1 timestamp is not fresh' }
+          if ((Get-FileHash $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne '${{ steps.candidate.outputs.candidate_sha256 }}') {
+            throw 'Round 1 OpenAI probe candidate changed during the live call'
+          }
+          "model=$($evidence.model)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "nonce_sha256=$($evidence.nonceSha256)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "response_id_sha256=$($evidence.responseIdSha256)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "completed_at=$($evidence.completedAt)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Round 1 bounded install, real DOM/listener run, smoke, and uninstall
+        shell: pwsh
+        run: |
+          ./scripts/windows-round2.ps1 `
+            -ArtifactDirectory ./release/windows `
+            -RequireAuthenticode `
+            -ExpectedSignerSubject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -ExpectedSignerThumbprint $env:RETAILLENS_ESIGNER_CERT_THUMBPRINT
+
+      - name: Create and reverify strict signed staging
+        shell: pwsh
+        run: |
+          ./scripts/windows-stage-release.ps1 `
+            -ArtifactDirectory ./release/windows `
+            -MetadataDirectory ./release/metadata `
+            -NoticesPath ./THIRD_PARTY_NOTICES.txt `
+            -StagingDirectory ./signed-staging `
+            -ExpectedSignerThumbprint $env:RETAILLENS_ESIGNER_CERT_THUMBPRINT
+          ./scripts/windows-verify-staging.ps1 `
+            -StagingDirectory ./signed-staging `
+            -ExpectedSignerThumbprint $env:RETAILLENS_ESIGNER_CERT_THUMBPRINT
+          ./scripts/windows-verify-authenticode.ps1 `
+            -ArtifactDirectory ./signed-staging `
+            -ExpectedSignerSubject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -ExpectedSignerThumbprint $env:RETAILLENS_ESIGNER_CERT_THUMBPRINT `
+            -InspectEmbeddedPayload
+          ./scripts/windows-verify-staging.ps1 `
+            -StagingDirectory ./signed-staging `
+            -ExpectedSignerThumbprint $env:RETAILLENS_ESIGNER_CERT_THUMBPRINT
+
+      - name: Independently clean every temporary eSigner state item before Round 2
+        if: always()
+        shell: pwsh
+        run: ./scripts/windows-clean-esigner.ps1
+
+      - name: Reconfirm remote main, immutable tag, and model before Round 2
+        shell: pwsh
+        run: |
+          git fetch --force origin '+refs/heads/main:refs/remotes/origin/main' '+refs/tags/*:refs/tags/*'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not refresh remote main and tags' }
+          $expected = '${{ steps.release_identity.outputs.commit_sha }}'.ToLowerInvariant()
+          if ((git rev-parse HEAD).Trim().ToLowerInvariant() -cne $expected) { throw 'Round 2 checkout changed' }
+          if ((git rev-parse refs/remotes/origin/main).Trim().ToLowerInvariant() -cne $expected) { throw 'Remote main moved' }
+          if ((git rev-list -n 1 $env:RELEASE_TAG).Trim().ToLowerInvariant() -cne $expected) { throw 'Release tag moved' }
+          if ($env:RETAILLENS_CERTIFICATION_OPENAI_MODEL -cne '${{ steps.openai_round_1.outputs.model }}') { throw 'Protected OpenAI model changed between rounds' }
+
+      - name: Round 2 - recreate locked dependencies and repeat source/desktop gates
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath node_modules) { Remove-Item -LiteralPath node_modules -Recurse -Force }
+          pnpm install --frozen-lockfile
+          pnpm audit:prod
+          pnpm audit:all
+          pnpm test
+          pnpm metadata:attribution
+          pnpm metadata:notices:check
+          pnpm metadata:sbom
+          ./scripts/windows-signer-policy.test.ps1
+          ./scripts/windows-file-policy.test.ps1
+          ./scripts/windows-staging-policy.test.ps1
+          ./scripts/windows-wack-policy.test.ps1
+          ./scripts/windows-workflow-powershell-ast.test.ps1
+          pnpm test:desktop
+
+      - name: Reverify exact staging, every PE, and Round 2 lifecycle
+        shell: pwsh
+        run: |
+          ./scripts/windows-verify-staging.ps1 `
+            -StagingDirectory ./signed-staging `
+            -ExpectedSignerThumbprint '${{ steps.esigner.outputs.signer_thumbprint }}'
+          ./scripts/windows-verify-authenticode.ps1 `
+            -ArtifactDirectory ./signed-staging `
+            -ExpectedSignerSubject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -ExpectedSignerThumbprint '${{ steps.esigner.outputs.signer_thumbprint }}' `
+            -InspectEmbeddedPayload
+          $archive = @(Get-ChildItem signed-staging -File -Filter '*-portable-directory.zip')
+          if ($archive.Count -ne 1) { throw 'Round 2 expected one portable-directory ZIP' }
+          $hash = (Get-FileHash $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -cne '${{ steps.candidate.outputs.candidate_sha256 }}') { throw 'Round 2 candidate differs from Round 1' }
+          ./scripts/windows-round2.ps1 `
+            -ArtifactDirectory ./signed-staging `
+            -RequireAuthenticode `
+            -ExpectedSignerSubject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -ExpectedSignerThumbprint '${{ steps.esigner.outputs.signer_thumbprint }}'
+          ./scripts/windows-verify-staging.ps1 `
+            -StagingDirectory ./signed-staging `
+            -ExpectedSignerThumbprint '${{ steps.esigner.outputs.signer_thumbprint }}'
+
+      - name: Bind independent Round 2 live OpenAI capability and compare rounds
+        shell: pwsh
+        env:
+          RETAILLENS_CERTIFICATION_OPENAI_API_KEY: ${{ secrets.RETAILLENS_CERTIFICATION_OPENAI_API_KEY }}
+          RETAILLENS_CERTIFICATION_COMMIT_SHA: ${{ steps.release_identity.outputs.commit_sha }}
+          RETAILLENS_CERTIFICATION_CANDIDATE_SHA256: ${{ steps.candidate.outputs.candidate_sha256 }}
+          RETAILLENS_CERTIFICATION_ROUND: "2"
+        run: |
+          $archive = @(Get-ChildItem signed-staging -File -Filter '*-portable-directory.zip')
+          if (
+            $archive.Count -ne 1 -or
+            (Get-FileHash $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne '${{ steps.candidate.outputs.candidate_sha256 }}'
+          ) { throw 'Round 2 OpenAI preflight candidate bytes are not exact' }
+          $path = 'release/metadata/OPENAI_CERTIFICATION_ROUND_2.json'
+          node scripts/validate-openai-certification.mjs $path
+          $evidence = Get-Content $path -Raw | ConvertFrom-Json
+          if (
+            $evidence.schemaVersion -ne 2 -or
+            $evidence.model -cne '${{ steps.openai_round_1.outputs.model }}' -or
+            $evidence.commitSha -cne '${{ steps.release_identity.outputs.commit_sha }}' -or
+            $evidence.candidateSha256 -cne '${{ steps.candidate.outputs.candidate_sha256 }}' -or
+            $evidence.certificationRound -cne '2' -or
+            $evidence.nonceSha256 -notmatch '^[0-9a-f]{64}$' -or
+            $evidence.responseIdSha256 -notmatch '^[0-9a-f]{64}$' -or
+            $evidence.nonceSha256 -ceq '${{ steps.openai_round_1.outputs.nonce_sha256 }}' -or
+            $evidence.responseIdSha256 -ceq '${{ steps.openai_round_1.outputs.response_id_sha256 }}'
+          ) { throw 'OpenAI rounds are not two independent probes bound to one commit/model/candidate' }
+          $round1Time = [DateTimeOffset]'${{ steps.openai_round_1.outputs.completed_at }}'
+          $round2Time = [DateTimeOffset]$evidence.completedAt
+          if (
+            $round2Time -le $round1Time -or
+            $round2Time -gt [DateTimeOffset]::UtcNow.AddMinutes(2) -or
+            $round2Time -lt [DateTimeOffset]::UtcNow.AddMinutes(-2)
+          ) {
+            throw 'OpenAI Round 2 timestamp is not fresh and later than Round 1'
+          }
+          if ((Get-FileHash $archive[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne '${{ steps.candidate.outputs.candidate_sha256 }}') {
+            throw 'Round 2 OpenAI probe candidate changed during the live call'
+          }
+          ./scripts/windows-verify-staging.ps1 `
+            -StagingDirectory ./signed-staging `
+            -ExpectedSignerThumbprint '${{ steps.esigner.outputs.signer_thumbprint }}'
+
+      - name: Transfer candidate only after both complete rounds passed
+        id: transfer_candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: retaillens-windows-trusted-candidate
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
+          path: signed-staging/
+
+  publish_verified_release:
+    name: Publish - isolated write token, tag/assets/draft closed loop
+    needs: build_sign_round_1
+    if: github.repository_owner == 'lzy2767865503-pixel' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: github-release
+    permissions:
+      actions: write
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      EXPECTED_COMMIT: ${{ needs.build_sign_round_1.outputs.commit_sha }}
+      EXPECTED_CANDIDATE_SHA256: ${{ needs.build_sign_round_1.outputs.candidate_sha256 }}
+      EXPECTED_TRANSFER_ARTIFACT_ID: ${{ needs.build_sign_round_1.outputs.transfer_artifact_id }}
+      RETAILLENS_RELEASE_TAG_RULESET_ID: "21631606"
+      RETAILLENS_RELEASE_MAIN_RULESET_ID: "21633558"
+
+    steps:
+      - name: Download already twice-verified signed assets without checking out repository code
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: retaillens-windows-trusted-candidate
+          path: signed-candidate
+
+      - name: Delete transient Actions transfer immediately after download
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          if ($env:EXPECTED_TRANSFER_ARTIFACT_ID -notmatch '^\d+$') {
+            throw 'Transient transfer artifact has no exact numeric ID'
+          }
+          & gh api --method DELETE "repos/$env:GH_REPO/actions/artifacts/$env:EXPECTED_TRANSFER_ARTIFACT_ID"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not delete transient Actions transfer artifact' }
+          $deletedOutput = & gh api "repos/$env:GH_REPO/actions/artifacts/$env:EXPECTED_TRANSFER_ARTIFACT_ID" 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($deletedOutput | Out-String) -notmatch 'HTTP 404') {
+            throw 'Transient Actions transfer artifact still resolves after deletion'
+          }
+
+      - name: Validate exact local publication inventory without a repository token
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $expectedNames = @(
+            "RetailDecisionStudioByLAIZEYU-$version-x64-portable-directory.zip",
+            'SHA256SUMS.txt', 'PE-SIGNING-INVENTORY.json', 'THIRD_PARTY_NOTICES.txt',
+            "retaillens-$version.spdx.json", 'STAGING-INVENTORY.json'
+          ) | Sort-Object
+          $assets = @(Get-ChildItem signed-candidate -File | Sort-Object Name)
+          if (
+            @(Get-ChildItem signed-candidate -Directory -Force).Count -ne 0 -or
+            $assets.Count -ne $expectedNames.Count -or
+            @(Compare-Object $expectedNames @($assets.Name | Sort-Object) -CaseSensitive).Count -ne 0
+          ) {
+            throw 'Publication candidate contains missing or unexpected assets'
+          }
+          $archive = Get-Item "signed-candidate/RetailDecisionStudioByLAIZEYU-$version-x64-portable-directory.zip"
+          if ((Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_CANDIDATE_SHA256) {
+            throw 'Publication candidate ZIP differs from the twice-verified bytes'
+          }
+          $inventory = Get-Content signed-candidate/STAGING-INVENTORY.json -Raw | ConvertFrom-Json
+          $inventoryKeys = @($inventory.PSObject.Properties.Name) | Sort-Object
+          if (
+            @(Compare-Object @('author', 'files', 'product', 'schemaVersion', 'version') $inventoryKeys -CaseSensitive).Count -ne 0 -or
+            $inventory.schemaVersion -ne 2 -or
+            $inventory.product -cne 'Retail Decision Studio by LAI ZEYU' -or
+            $inventory.author -cne 'LAI ZEYU（来泽宇）' -or
+            $inventory.version -cne $version -or
+            @($inventory.files).Count -ne ($expectedNames.Count - 1)
+          ) { throw 'Local staging inventory identity/schema is not exact' }
+          $inventoryNames = @($inventory.files | ForEach-Object { [string]$_.name }) | Sort-Object
+          $expectedInventoryNames = @($expectedNames | Where-Object { $_ -cne 'STAGING-INVENTORY.json' }) | Sort-Object
+          if (@(Compare-Object $expectedInventoryNames $inventoryNames -CaseSensitive).Count -ne 0) {
+            throw 'Local staging inventory file set is not exact'
+          }
+          foreach ($entry in @($inventory.files)) {
+            $entryKeys = @($entry.PSObject.Properties.Name) | Sort-Object
+            if (
+              @(Compare-Object @('name', 'role', 'sha256', 'size') $entryKeys -CaseSensitive).Count -ne 0 -or
+              [string]$entry.name -cne [System.IO.Path]::GetFileName([string]$entry.name) -or
+              [string]$entry.sha256 -notmatch '^[0-9a-f]{64}$' -or
+              [long]$entry.size -le 0
+            ) { throw 'Local staging inventory entry is invalid' }
+            $asset = Get-Item (Join-Path signed-candidate ([string]$entry.name))
+            if (
+              $asset.Length -ne [long]$entry.size -or
+              (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$entry.sha256
+            ) { throw "Local staging inventory mismatch for $($entry.name)" }
+          }
+
+      - name: Create verified draft, close remote loop, publish, and rollback ambiguity
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Native failures are inspected explicitly so a partially-created
+          # draft can still be discovered by nonce and safely rolled back.
+          $PSNativeCommandUseErrorActionPreference = $false
+          function Invoke-GhJson([string[]]$Arguments) {
+            $text = & gh @Arguments
+            if ($LASTEXITCODE -ne 0) { throw "gh command failed: gh $($Arguments -join ' ')" }
+            return $text | ConvertFrom-Json
+          }
+          function Get-PeeledTagSha {
+            $reference = Invoke-GhJson @('api', "repos/${{ github.repository }}/git/ref/tags/$env:RELEASE_TAG")
+            $objectType = [string]$reference.object.type
+            $objectSha = [string]$reference.object.sha
+            for ($depth = 0; $depth -lt 5 -and $objectType -ceq 'tag'; $depth += 1) {
+              $tagObject = Invoke-GhJson @('api', "repos/${{ github.repository }}/git/tags/$objectSha")
+              $objectType = [string]$tagObject.object.type
+              $objectSha = [string]$tagObject.object.sha
+            }
+            if ($objectType -cne 'commit' -or $objectSha -notmatch '^[0-9a-f]{40}$') {
+              throw 'Release tag does not peel to one commit'
+            }
+            return $objectSha.ToLowerInvariant()
+          }
+          function Assert-Tag {
+            if ((Get-PeeledTagSha) -cne $env:EXPECTED_COMMIT) { throw 'Remote release tag moved away from approved main commit' }
+          }
+          function Assert-ImmutableTagRuleset {
+            $ruleset = Invoke-GhJson @(
+              'api',
+              "repos/${{ github.repository }}/rulesets/$env:RETAILLENS_RELEASE_TAG_RULESET_ID"
+            )
+            $includedRefs = @($ruleset.conditions.ref_name.include)
+            $excludedRefs = @($ruleset.conditions.ref_name.exclude)
+            $ruleTypes = @($ruleset.rules | ForEach-Object { [string]$_.type }) | Sort-Object
+            if (
+              [long]$ruleset.id -ne [long]$env:RETAILLENS_RELEASE_TAG_RULESET_ID -or
+              $ruleset.name -cne 'Immutable Windows release tags' -or
+              $ruleset.target -cne 'tag' -or
+              $ruleset.source_type -cne 'Repository' -or
+              $ruleset.source -cne '${{ github.repository }}' -or
+              $ruleset.enforcement -cne 'active' -or
+              $includedRefs.Count -ne 1 -or $includedRefs[0] -cne 'refs/tags/v*' -or
+              $excludedRefs.Count -ne 0 -or
+              @(Compare-Object @('deletion', 'update') $ruleTypes -CaseSensitive).Count -ne 0 -or
+              $ruleTypes.Count -ne 2 -or
+              @($ruleset.bypass_actors).Count -ne 0 -or
+              $ruleset.current_user_can_bypass -cne 'never'
+            ) { throw 'Immutable release-tag ruleset is missing, inactive, bypassable, or changed' }
+          }
+          function Assert-ProtectedMainRuleset {
+            $ruleset = Invoke-GhJson @(
+              'api',
+              "repos/${{ github.repository }}/rulesets/$env:RETAILLENS_RELEASE_MAIN_RULESET_ID"
+            )
+            $includedRefs = @($ruleset.conditions.ref_name.include)
+            $excludedRefs = @($ruleset.conditions.ref_name.exclude)
+            $ruleTypes = @($ruleset.rules | ForEach-Object { [string]$_.type }) | Sort-Object
+            $pullRequestRules = @($ruleset.rules | Where-Object { $_.type -ceq 'pull_request' })
+            if ($pullRequestRules.Count -ne 1) {
+              throw 'Protected-main ruleset lacks one exact pull-request rule'
+            }
+            $pullRequest = $pullRequestRules[0].parameters
+            $mergeMethods = @($pullRequest.allowed_merge_methods | ForEach-Object { [string]$_ }) | Sort-Object
+            if (
+              [long]$ruleset.id -ne [long]$env:RETAILLENS_RELEASE_MAIN_RULESET_ID -or
+              $ruleset.name -cne 'Protected main release lineage' -or
+              $ruleset.target -cne 'branch' -or
+              $ruleset.source_type -cne 'Repository' -or
+              $ruleset.source -cne '${{ github.repository }}' -or
+              $ruleset.enforcement -cne 'active' -or
+              $includedRefs.Count -ne 1 -or $includedRefs[0] -cne 'refs/heads/main' -or
+              $excludedRefs.Count -ne 0 -or
+              @(Compare-Object @('deletion', 'non_fast_forward', 'pull_request') $ruleTypes -CaseSensitive).Count -ne 0 -or
+              $ruleTypes.Count -ne 3 -or
+              [int]$pullRequest.required_approving_review_count -ne 0 -or
+              $pullRequest.dismiss_stale_reviews_on_push -ne $true -or
+              @($pullRequest.required_reviewers).Count -ne 0 -or
+              $pullRequest.require_code_owner_review -ne $false -or
+              $pullRequest.require_last_push_approval -ne $false -or
+              $pullRequest.required_review_thread_resolution -ne $true -or
+              $pullRequest.require_extra_approval_for_unattributed_changes -ne $false -or
+              @(Compare-Object @('merge', 'rebase', 'squash') $mergeMethods -CaseSensitive).Count -ne 0 -or
+              $mergeMethods.Count -ne 3 -or
+              @($ruleset.bypass_actors).Count -ne 0 -or
+              $ruleset.current_user_can_bypass -cne 'never'
+            ) { throw 'Protected-main ruleset is missing, inactive, bypassable, or changed' }
+          }
+          function Assert-MainAndTag {
+            $main = Invoke-GhJson @('api', "repos/${{ github.repository }}/git/ref/heads/main")
+            if (
+              [string]$main.object.type -cne 'commit' -or
+              [string]$main.object.sha -notmatch '^[0-9a-f]{40}$' -or
+              [string]$main.object.sha.ToLowerInvariant() -cne $env:EXPECTED_COMMIT
+            ) { throw 'Remote main moved away from the approved release commit' }
+            Assert-Tag
+            Assert-ImmutableTagRuleset
+            Assert-ProtectedMainRuleset
+          }
+          function Assert-OwnedReleaseIdentity($Release) {
+            if (
+              -not $script:ownedReleaseId -or
+              [string]$Release.id -notmatch '^\d+$' -or
+              [long]$Release.id -ne $script:ownedReleaseId -or
+              $Release.tag_name -cne $env:RELEASE_TAG -or
+              $Release.prerelease -ne $false -or
+              $Release.name -cne $script:expectedReleaseName -or
+              -not ([string]$Release.body).Contains($script:ownershipMarker, [StringComparison]::Ordinal)
+            ) { throw 'Release ID ownership no longer matches this workflow-created numeric Release ID' }
+          }
+          function Get-OwnedRelease {
+            $byId = Invoke-GhJson @('api', "repos/${{ github.repository }}/releases/$script:ownedReleaseId")
+            Assert-OwnedReleaseIdentity $byId
+            $byTag = Invoke-GhJson @('api', "repos/${{ github.repository }}/releases/tags/$env:RELEASE_TAG")
+            Assert-OwnedReleaseIdentity $byTag
+            return $byId
+          }
+          function Assert-ReleaseAssets($Release, [bool]$ExpectedDraft, [string]$DownloadRoot) {
+            Assert-OwnedReleaseIdentity $Release
+            if ($Release.draft -ne $ExpectedDraft) {
+              throw 'Remote release tag/draft/prerelease state is not exact'
+            }
+            $local = @(Get-ChildItem signed-candidate -File | Sort-Object Name)
+            if (@(Compare-Object @($local.Name) @($Release.assets.name | Sort-Object) -CaseSensitive).Count -ne 0) {
+              throw 'Remote release asset inventory differs from local verified assets'
+            }
+            foreach ($asset in $local) {
+              $remoteMetadata = @($Release.assets | Where-Object { $_.name -ceq $asset.Name })
+              if ($remoteMetadata.Count -ne 1 -or [long]$remoteMetadata[0].size -ne $asset.Length) {
+                throw "Remote release size mismatch for $($asset.Name)"
+              }
+              if ($DownloadRoot) {
+                $remote = Join-Path $DownloadRoot $asset.Name
+                if (
+                  -not (Test-Path -LiteralPath $remote -PathType Leaf) -or
+                  (Get-FileHash $remote -Algorithm SHA256).Hash -cne (Get-FileHash $asset.FullName -Algorithm SHA256).Hash
+                ) { throw "Remote release hash mismatch for $($asset.Name)" }
+              }
+            }
+          }
+
+          Assert-MainAndTag
+          $existingOutput = & gh api "repos/${{ github.repository }}/releases/tags/$env:RELEASE_TAG" 2>&1
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists; overwrite is forbidden' }
+          if (($existingOutput | Out-String) -notmatch 'HTTP 404') { throw 'Could not unambiguously prove release absence' }
+
+          $draftCreated = $false
+          $publicationAttempted = $false
+          $script:ownedReleaseId = [long]0
+          $script:ownershipMarker = "Release ownership nonce: $([Guid]::NewGuid().ToString('D')); workflow ${{ github.run_id }} attempt ${{ github.run_attempt }}"
+          $script:expectedReleaseName = "Retail Decision Studio by LAI ZEYU $env:RELEASE_TAG"
+          $script:releaseNotes = "Designed and authored by LAI ZEYU（来泽宇）. Every released PE was verified against one exact trusted RFC3161-timestamped certificate and passed two independent Windows lifecycle rounds.`n`n$script:ownershipMarker"
+          try {
+            $assets = @(Get-ChildItem signed-candidate -File | Sort-Object Name)
+            $arguments = @(
+              'release', 'create', $env:RELEASE_TAG, '--verify-tag', '--draft',
+              '--title', $script:expectedReleaseName,
+              '--notes', $script:releaseNotes
+            )
+            foreach ($asset in $assets) { $arguments += $asset.FullName }
+            & gh @arguments
+            $createExitCode = $LASTEXITCODE
+            $draft = $null
+            for ($attempt = 1; $attempt -le 10 -and -not $draft; $attempt += 1) {
+              $draftOutput = & gh api "repos/${{ github.repository }}/releases/tags/$env:RELEASE_TAG" 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                $draft = ($draftOutput | ConvertFrom-Json)
+                break
+              }
+              if (($draftOutput | Out-String) -notmatch 'HTTP 404') {
+                throw 'Draft creation state could not be queried unambiguously'
+              }
+              # Draft-by-tag visibility can lag. The authenticated release list
+              # is a second read-only recovery path bound to this private nonce.
+              $releaseListOutput = & gh api "repos/${{ github.repository }}/releases?per_page=100" 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Draft creation state list fallback could not be queried unambiguously'
+              }
+              $ownedMatches = @(
+                ($releaseListOutput | ConvertFrom-Json) | Where-Object {
+                  $_.tag_name -ceq $env:RELEASE_TAG -and
+                  $_.name -ceq $script:expectedReleaseName -and
+                  ([string]$_.body).Contains($script:ownershipMarker, [StringComparison]::Ordinal)
+                }
+              )
+              if ($ownedMatches.Count -gt 1) {
+                throw 'PUBLICATION AMBIGUITY: more than one release matched this run ownership nonce'
+              }
+              if ($ownedMatches.Count -eq 1) {
+                $draft = $ownedMatches[0]
+                break
+              }
+              if ($attempt -lt 10) { Start-Sleep -Seconds 3 }
+            }
+            if (-not $draft) {
+              throw "Draft release creation failed without an owned remote draft (gh exit $createExitCode)"
+            }
+            if (
+              $draft.name -cne $script:expectedReleaseName -or
+              -not ([string]$draft.body).Contains($script:ownershipMarker, [StringComparison]::Ordinal)
+            ) {
+              throw 'PUBLICATION AMBIGUITY: tag resolved to a release without this run ownership nonce; refusing to mutate it'
+            }
+            if ([string]$draft.id -notmatch '^\d+$' -or [long]$draft.id -le 0) {
+              throw 'Workflow-created draft has no valid numeric Release ID'
+            }
+            $script:ownedReleaseId = [long]$draft.id
+            $draftCreated = $true
+            Assert-OwnedReleaseIdentity $draft
+            Assert-MainAndTag
+            if ($createExitCode -ne 0) {
+              throw "Draft release creation or asset upload failed after owned Release ID capture (gh exit $createExitCode)"
+            }
+            $draftRoot = Join-Path $env:RUNNER_TEMP ("retaillens-draft-$([Guid]::NewGuid().ToString('N'))")
+            New-Item -ItemType Directory -Path $draftRoot | Out-Null
+            & gh release download $env:RELEASE_TAG --dir $draftRoot
+            if ($LASTEXITCODE -ne 0) { throw 'Could not redownload draft assets' }
+            $draft = Get-OwnedRelease
+            Assert-ReleaseAssets $draft $true $draftRoot
+            Remove-Item -LiteralPath $draftRoot -Recurse -Force
+            Assert-MainAndTag
+
+            $publicationAttempted = $true
+            $beforePublish = Get-OwnedRelease
+            Assert-ReleaseAssets $beforePublish $true ''
+            $published = Invoke-GhJson @(
+              'api', '--method', 'PATCH',
+              "repos/${{ github.repository }}/releases/$script:ownedReleaseId",
+              '-F', 'draft=false'
+            )
+            Assert-OwnedReleaseIdentity $published
+            $published = Get-OwnedRelease
+            Assert-MainAndTag
+            $publicRoot = Join-Path $env:RUNNER_TEMP ("retaillens-public-$([Guid]::NewGuid().ToString('N'))")
+            New-Item -ItemType Directory -Path $publicRoot | Out-Null
+            foreach ($asset in @($published.assets)) {
+              $destination = Join-Path $publicRoot ([string]$asset.name)
+              $downloaded = $false
+              for ($attempt = 1; $attempt -le 5 -and -not $downloaded; $attempt += 1) {
+                try {
+                  Invoke-WebRequest -Uri ([string]$asset.browser_download_url) -OutFile $destination -MaximumRedirection 10
+                  $downloaded = $true
+                } catch {
+                  if ($attempt -eq 5) { throw }
+                  Start-Sleep -Seconds 3
+                }
+              }
+            }
+            $published = Get-OwnedRelease
+            Assert-ReleaseAssets $published $false $publicRoot
+            Remove-Item -LiteralPath $publicRoot -Recurse -Force
+            Assert-MainAndTag
+            $published = Get-OwnedRelease
+            Assert-ReleaseAssets $published $false ''
+          } catch {
+            $primary = $_.Exception.Message
+            if ($draftCreated) {
+              try {
+                if ($script:ownedReleaseId -le 0) {
+                  throw 'draft creation succeeded but numeric Release ID ownership was not captured'
+                }
+                $current = Get-OwnedRelease
+                if (-not $publicationAttempted -and $current.draft -eq $true) {
+                  & gh api --method DELETE "repos/${{ github.repository }}/releases/$script:ownedReleaseId"
+                  if ($LASTEXITCODE -ne 0) { throw 'owned pre-publication draft deletion failed' }
+                  foreach ($deletedEndpoint in @(
+                    "repos/${{ github.repository }}/releases/$script:ownedReleaseId",
+                    "repos/${{ github.repository }}/releases/tags/$env:RELEASE_TAG"
+                  )) {
+                    $deletedOutput = & gh api $deletedEndpoint 2>&1
+                    if ($LASTEXITCODE -eq 0 -or ($deletedOutput | Out-String) -notmatch 'HTTP 404') {
+                      throw "owned pre-publication draft still resolves after deletion: $deletedEndpoint"
+                    }
+                  }
+                  $draftCreated = $false
+                } elseif ($publicationAttempted -or $current.draft -ne $true) {
+                  $rolledBack = Invoke-GhJson @(
+                    'api', '--method', 'PATCH',
+                    "repos/${{ github.repository }}/releases/$script:ownedReleaseId",
+                    '-F', 'draft=true'
+                  )
+                  Assert-OwnedReleaseIdentity $rolledBack
+                  $rolledBack = Get-OwnedRelease
+                  if ($rolledBack.draft -ne $true) { throw 'release is still public after rollback' }
+                }
+              } catch {
+                throw "PUBLICATION AMBIGUITY REQUIRES IMMEDIATE MANUAL ACTION. Primary failure: $primary. Rollback failure: $($_.Exception.Message)"
+              }
+            }
+            throw $primary
+          }
+          Write-Host 'GitHub release is public only after tag, draft, asset-name, size, authenticated hash, anonymous public hash, and final tag checks all passed.'

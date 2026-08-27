@@ -52,14 +52,14 @@ export function AppHeader({
         className="brand"
         type="button"
         onClick={() => onSectionChange("assessment")}
-        aria-label="RetailLens home"
+        aria-label="Retail Decision Studio home"
       >
         <span className="brand-mark" aria-hidden="true">
-          RL
+          RDS
         </span>
-        <span>
-          RetailLens <span className="brand-slash">/</span>{" "}
-          <span className="brand-zh">零售透镜</span>
+        <span className="brand-name">
+          Retail Decision Studio
+          <small>by LAI ZEYU</small>
         </span>
       </button>
 

@@ -1,0 +1,11 @@
+{
+  "allowedSignerSimpleNames": [
+    "LAI ZEYU",
+    "来泽宇"
+  ],
+  "expectedPeMetadata": {
+    "companyName": "LAI ZEYU（来泽宇）",
+    "legalCopyright": "Copyright © 2026 LAI ZEYU（来泽宇）",
+    "productName": "Retail Decision Studio by LAI ZEYU"
+  }
+}
