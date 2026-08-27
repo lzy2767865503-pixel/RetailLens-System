@@ -8,7 +8,10 @@ param(
   [Parameter(Mandatory = $true)] [string]$ExpectedWorkflowRef,
   [Parameter(Mandatory = $true)] [string]$ExpectedWorkflowRunId,
   [Parameter(Mandatory = $true)] [string]$ExpectedWorkflowRunAttempt,
-  [Parameter(Mandatory = $true)] [string]$ExpectedApprovedWackFileVersion
+  [Parameter(Mandatory = $true)] [string]$ExpectedApprovedWackFileVersion,
+  [Parameter(Mandatory = $true)] [string]$ExpectedApprovedWackSha256,
+  [Parameter(Mandatory = $true)] [string]$ExpectedApprovedWackSignerSubject,
+  [Parameter(Mandatory = $true)] [string]$ExpectedApprovedWackSignerThumbprint
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,10 +88,11 @@ Assert-ExactKeys $record.report @(
   "testCount", "testInventorySha256", "tests"
 ) "WACK private run record report"
 Assert-ExactKeys $record.appcert @(
-  "approvedFileVersion", "fileVersion", "sha256", "signerSubject", "signerThumbprint"
+  "approvedFileVersion", "approvedSha256", "approvedSignerSubject", "approvedSignerThumbprint",
+  "fileVersion", "sha256", "signerSubject", "signerThumbprint"
 ) "WACK private run record appcert"
 if (
-  $record.schemaVersion -ne 2 -or
+  $record.schemaVersion -ne 3 -or
   $record.evidenceKind -cne "private-same-run-record" -or
   $record.cryptographicallyAttested -ne $false -or
   $record.transferable -ne $false -or
@@ -182,11 +186,27 @@ $kitPath = [System.IO.Path]::GetFullPath(
 if (-not (Test-Path -LiteralPath $kitPath -PathType Leaf)) { throw "Current appcert.exe is missing." }
 $kitItem = Get-Item -LiteralPath $kitPath -Force
 $canonicalFileVersion = $kitItem.VersionInfo.FileVersionRaw.ToString()
+$canonicalSha256 = (Get-FileHash -LiteralPath $kitPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $kitSignature = Get-AuthenticodeSignature -LiteralPath $kitPath
+$canonicalSignerSubject = if ($kitSignature.SignerCertificate) { [string]$kitSignature.SignerCertificate.Subject } else { "" }
+$canonicalSignerThumbprint = if ($kitSignature.SignerCertificate) {
+  $kitSignature.SignerCertificate.Thumbprint.Replace(" ", "").ToLowerInvariant()
+} else { "" }
+Assert-RetailLensApprovedAppcertIdentity `
+  -ActualFileVersion $canonicalFileVersion `
+  -ActualSha256 $canonicalSha256 `
+  -ActualSignerSubject $canonicalSignerSubject `
+  -ActualSignerThumbprint $canonicalSignerThumbprint `
+  -ApprovedFileVersion $ExpectedApprovedWackFileVersion `
+  -ApprovedSha256 $ExpectedApprovedWackSha256 `
+  -ApprovedSignerSubject $ExpectedApprovedWackSignerSubject `
+  -ApprovedSignerThumbprint $ExpectedApprovedWackSignerThumbprint
 if (
-  $record.appcert.sha256 -cne (Get-FileHash -LiteralPath $kitPath -Algorithm SHA256).Hash.ToLowerInvariant() -or
-  $ExpectedApprovedWackFileVersion -notmatch '^\d+(?:\.\d+){3}$' -or
+  $record.appcert.sha256 -cne $canonicalSha256 -or
   [string]$record.appcert.approvedFileVersion -cne $ExpectedApprovedWackFileVersion -or
+  [string]$record.appcert.approvedSha256 -cne $ExpectedApprovedWackSha256 -or
+  [string]$record.appcert.approvedSignerSubject -cne $ExpectedApprovedWackSignerSubject -or
+  [string]$record.appcert.approvedSignerThumbprint -cne $ExpectedApprovedWackSignerThumbprint -or
   [string]$record.appcert.fileVersion -cne $ExpectedApprovedWackFileVersion -or
   $canonicalFileVersion -cne [string]$record.appcert.fileVersion -or
   ($kitItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
@@ -196,8 +216,8 @@ if (
   -not (@($kitSignature.SignerCertificate.EnhancedKeyUsageList) | Where-Object {
     $_.ObjectId.Value -eq "1.3.6.1.5.5.7.3.3"
   }) -or
-  $kitSignature.SignerCertificate.Subject -cne [string]$record.appcert.signerSubject -or
-  $kitSignature.SignerCertificate.Thumbprint.Replace(" ", "").ToLowerInvariant() -cne [string]$record.appcert.signerThumbprint
+  $canonicalSignerSubject -cne [string]$record.appcert.signerSubject -or
+  $canonicalSignerThumbprint -cne [string]$record.appcert.signerThumbprint
 ) { throw "WACK private run record does not match the current trusted appcert.exe bytes/signature." }
 
 Write-Host "WACK round $ExpectedRound same-run private record passed immediate consistency verification. It is not a cryptographic attestation."

@@ -21,6 +21,15 @@ function Assert-ExactKeys($Value, [string[]]$ExpectedKeys, [string]$Label) {
   if (($actual -join "|") -cne ($expected -join "|")) { throw "$Label schema is not exact." }
 }
 
+function Remove-ReparseFreeScreenshotTree([string]$Path, [string]$Label) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $items = @(Get-Item -LiteralPath $Path -Force; Get-ChildItem -LiteralPath $Path -Recurse -Force)
+  if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+    throw "$Label contains a reparse point and cannot be recursively deleted."
+  }
+  Remove-Item -LiteralPath $Path -Recurse -Force
+}
+
 function Get-PngDimensionsAndPolicy([string]$LiteralPath) {
   $bytes = [System.IO.File]::ReadAllBytes($LiteralPath)
   if ($bytes.Length -lt 57 -or $bytes.Length -gt 15000000) { throw "Store screenshot PNG size is outside the strict budget." }
@@ -165,8 +174,8 @@ try {
   [IO.Directory]::Move($incomplete, $destination)
   $moved = $true
 } catch {
-  if ($moved -and (Test-Path -LiteralPath $destination)) { Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue }
-  if (Test-Path -LiteralPath $incomplete) { Remove-Item -LiteralPath $incomplete -Recurse -Force -ErrorAction SilentlyContinue }
+  if ($moved -and (Test-Path -LiteralPath $destination)) { Remove-ReparseFreeScreenshotTree -Path $destination -Label "Failed screenshot destination" }
+  if (Test-Path -LiteralPath $incomplete) { Remove-ReparseFreeScreenshotTree -Path $incomplete -Label "Failed screenshot staging" }
   throw
 }
 

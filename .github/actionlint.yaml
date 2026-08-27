@@ -5,6 +5,7 @@ self-hosted-runner:
     - elevated
     - retaillens-release-build
     - retaillens-release-signing
+    - retaillens-release-verifier
     - retaillens-release-publisher
     - ephemeral
     - no-checkout

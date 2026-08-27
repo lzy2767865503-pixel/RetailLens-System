@@ -45,6 +45,9 @@ jobs:
       RETAILLENS_GENERATIVE_AI_DECLARED: ${{ vars.RETAILLENS_GENERATIVE_AI_DECLARED }}
       RETAILLENS_AUTOMATIC_BACKUP_DISABLED: ${{ vars.RETAILLENS_AUTOMATIC_BACKUP_DISABLED }}
       RETAILLENS_APPROVED_WACK_FILE_VERSION: ${{ vars.RETAILLENS_APPROVED_WACK_FILE_VERSION }}
+      RETAILLENS_APPROVED_WACK_SHA256: ${{ vars.RETAILLENS_APPROVED_WACK_SHA256 }}
+      RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT: ${{ vars.RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT }}
+      RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT: ${{ vars.RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT }}
       RETAILLENS_PRIVATE_STORE_HANDOFF_ROOT: ${{ vars.RETAILLENS_PRIVATE_STORE_HANDOFF_ROOT }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
@@ -69,6 +72,11 @@ jobs:
           if ($env:RETAILLENS_APPROVED_WACK_FILE_VERSION -notmatch '^\d+(?:\.\d+){3}$') {
             throw 'RETAILLENS_APPROVED_WACK_FILE_VERSION must be an exact protected four-part version'
           }
+          if (
+            $env:RETAILLENS_APPROVED_WACK_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT -notmatch '^[0-9a-f]{40}$' -or
+            $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT -notmatch '^[^\r\n]{10,500}$'
+          ) { throw 'Protected appcert SHA-256, exact signer Subject, and exact signer Thumbprint approvals are required' }
           git fetch --force origin '+refs/heads/main:refs/remotes/origin/main'
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch current remote main' }
           $head = (git rev-parse HEAD).Trim().ToLowerInvariant()
@@ -181,6 +189,9 @@ jobs:
             -WorkflowRef '${{ github.workflow_ref }}' `
             -WorkflowRunId '${{ github.run_id }}' -WorkflowRunAttempt '${{ github.run_attempt }}' `
             -ApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION `
+            -ApprovedWackSha256 $env:RETAILLENS_APPROVED_WACK_SHA256 `
+            -ApprovedWackSignerSubject $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT `
+            -ApprovedWackSignerThumbprint $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT `
             -ResetTimeoutSeconds 300 -TestTimeoutSeconds 3600
 
       - name: Immediately verify WACK round 1 private same-run record
@@ -194,7 +205,10 @@ jobs:
             -ExpectedRound 1 -ExpectedRepository '${{ github.repository }}' `
             -ExpectedCommitSha '${{ github.sha }}' -ExpectedWorkflowRef '${{ github.workflow_ref }}' `
             -ExpectedWorkflowRunId '${{ github.run_id }}' -ExpectedWorkflowRunAttempt '${{ github.run_attempt }}' `
-            -ExpectedApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION
+            -ExpectedApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION `
+            -ExpectedApprovedWackSha256 $env:RETAILLENS_APPROVED_WACK_SHA256 `
+            -ExpectedApprovedWackSignerSubject $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT `
+            -ExpectedApprovedWackSignerThumbprint $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT
 
       - name: Remove any WACK round 1 package/process/data residue while preserving candidate and certificate
         if: always()
@@ -257,6 +271,9 @@ jobs:
             -WorkflowRef '${{ github.workflow_ref }}' `
             -WorkflowRunId '${{ github.run_id }}' -WorkflowRunAttempt '${{ github.run_attempt }}' `
             -ApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION `
+            -ApprovedWackSha256 $env:RETAILLENS_APPROVED_WACK_SHA256 `
+            -ApprovedWackSignerSubject $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT `
+            -ApprovedWackSignerThumbprint $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT `
             -ResetTimeoutSeconds 300 -TestTimeoutSeconds 3600
 
       - name: Immediately verify WACK round 2 private same-run record and two-round identity
@@ -270,7 +287,10 @@ jobs:
             -ExpectedRound 2 -ExpectedRepository '${{ github.repository }}' `
             -ExpectedCommitSha '${{ github.sha }}' -ExpectedWorkflowRef '${{ github.workflow_ref }}' `
             -ExpectedWorkflowRunId '${{ github.run_id }}' -ExpectedWorkflowRunAttempt '${{ github.run_attempt }}' `
-            -ExpectedApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION
+            -ExpectedApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION `
+            -ExpectedApprovedWackSha256 $env:RETAILLENS_APPROVED_WACK_SHA256 `
+            -ExpectedApprovedWackSignerSubject $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT `
+            -ExpectedApprovedWackSignerThumbprint $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT
           $round1 = Get-Content (Join-Path $env:RETAILLENS_STORE_RUN_ROOT 'wack-round-1/WACK-private-run-record.json') -Raw | ConvertFrom-Json
           $round2 = Get-Content (Join-Path $env:RETAILLENS_STORE_RUN_ROOT 'wack-round-2/WACK-private-run-record.json') -Raw | ConvertFrom-Json
           if (
@@ -279,8 +299,17 @@ jobs:
             $round1.commitSha -cne $round2.commitSha -or
             $round1.appcert.approvedFileVersion -cne $env:RETAILLENS_APPROVED_WACK_FILE_VERSION -or
             $round2.appcert.approvedFileVersion -cne $env:RETAILLENS_APPROVED_WACK_FILE_VERSION -or
+            $round1.appcert.approvedSha256 -cne $env:RETAILLENS_APPROVED_WACK_SHA256 -or
+            $round2.appcert.approvedSha256 -cne $env:RETAILLENS_APPROVED_WACK_SHA256 -or
+            $round1.appcert.approvedSignerSubject -cne $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT -or
+            $round2.appcert.approvedSignerSubject -cne $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT -or
+            $round1.appcert.approvedSignerThumbprint -cne $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT -or
+            $round2.appcert.approvedSignerThumbprint -cne $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT -or
             $round1.appcert.fileVersion -cne $round2.appcert.fileVersion -or
             $round1.appcert.sha256 -cne $round2.appcert.sha256 -or
+            $round1.appcert.sha256 -cne $env:RETAILLENS_APPROVED_WACK_SHA256 -or
+            $round1.appcert.signerSubject -cne $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT -or
+            $round1.appcert.signerThumbprint -cne $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT -or
             $round1.runId -ceq $round2.runId -or
             [int]$round1.round -ne 1 -or [int]$round2.round -ne 2
           ) { throw 'WACK rounds are not two distinct runs on the same commit and exact candidate bytes' }
@@ -303,7 +332,10 @@ jobs:
             -CommitSha '${{ github.sha }}' `
             -Round1RecordPath (Join-Path $env:RETAILLENS_STORE_RUN_ROOT 'wack-round-1/WACK-private-run-record.json') `
             -Round2RecordPath (Join-Path $env:RETAILLENS_STORE_RUN_ROOT 'wack-round-2/WACK-private-run-record.json') `
-            -ApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION
+            -ApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION `
+            -ApprovedWackSha256 $env:RETAILLENS_APPROVED_WACK_SHA256 `
+            -ApprovedWackSignerSubject $env:RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT `
+            -ApprovedWackSignerThumbprint $env:RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT
 
       - name: Full independent cleanup of QA package, private key, certificate, records, and run root while preserving private handoff
         if: always()
@@ -325,6 +357,8 @@ jobs:
             "- Common unsigned/QA payload-tree SHA-256: $env:RETAILLENS_STORE_PAYLOAD_TREE_SHA256",
             '- Store listing screenshots: four exact 1366 x 768 PNGs captured by the installed QA candidate from built-in demo data and retained only in the private handoff.',
             "- Approved appcert.exe FileVersion: $env:RETAILLENS_APPROVED_WACK_FILE_VERSION",
+            "- Approved appcert.exe SHA-256: $env:RETAILLENS_APPROVED_WACK_SHA256",
+            "- Approved appcert.exe signer Subject/Thumbprint: exact protected values verified in both rounds and private retention",
             "- Workflow result: ${{ job.status }}",
             '- Candidate/evidence artifact upload: none',
             '- On success, the unsigned package and lineage receipt remain only under the pre-provisioned local fixed-NTFS exact-ACL handoff root.',

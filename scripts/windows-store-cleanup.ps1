@@ -30,6 +30,20 @@ function Invoke-CleanupAction {
   try { & $Action } catch { $errors.Add("${Name}: $($_.Exception.Message)") }
 }
 
+function Remove-ReparseFreeTree {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $root = Get-Item -LiteralPath $Path -Force
+  if (-not $root.PSIsContainer -or ($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    throw "$Label is not a regular directory."
+  }
+  $children = @(Get-ChildItem -LiteralPath $root.FullName -Recurse -Force)
+  if (@($children | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+    throw "$Label contains a reparse point and cannot be recursively deleted."
+  }
+  Remove-Item -LiteralPath $root.FullName -Recurse -Force
+}
+
 $state = $null
 if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
   Invoke-CleanupAction -Name "read state" -Action {
@@ -124,11 +138,11 @@ Invoke-CleanupAction -Name "remove package data" -Action {
   $prefix = $IdentityName + "_"
   Get-ChildItem -LiteralPath $packagesRoot -Directory -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) } |
-    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    ForEach-Object { Remove-ReparseFreeTree -Path $_.FullName -Label "Exact package data" }
 }
 Invoke-CleanupAction -Name "remove UI proof" -Action {
   if (-not $state) { return }
-  if (Test-Path -LiteralPath $proofPath) { Remove-Item -LiteralPath $proofPath -Recurse -Force }
+  if (Test-Path -LiteralPath $proofPath) { Remove-ReparseFreeTree -Path $proofPath -Label "Store UI proof" }
 }
 
 Invoke-CleanupAction -Name "remove owned listener" -Action {
@@ -179,7 +193,7 @@ if (-not $RuntimeOnly) {
         @(Get-ChildItem -LiteralPath $runRootItem.FullName -Recurse -Force |
           Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count -ne 0
       ) { throw "Store run root is not a regular reparse-point-free directory." }
-      Remove-Item -LiteralPath ([string]$state.runRoot) -Recurse -Force
+      Remove-ReparseFreeTree -Path ([string]$state.runRoot) -Label "Store run root"
     }
   }
   Invoke-CleanupAction -Name "remove workspace Store candidates" -Action {
@@ -192,7 +206,7 @@ if (-not $RuntimeOnly) {
         Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
         throw "Workspace Store candidate root contains a reparse point."
       }
-      Remove-Item -LiteralPath $workspaceCandidateRoot -Recurse -Force
+      Remove-ReparseFreeTree -Path $workspaceCandidateRoot -Label "Workspace Store candidate root"
     }
   }
   Invoke-CleanupAction -Name "remove state file" -Action {

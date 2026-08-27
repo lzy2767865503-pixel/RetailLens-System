@@ -89,6 +89,34 @@ function Assert-TreeByteEquality([string]$SourceRoot, [string]$InstalledRoot) {
   }
 }
 
+function Assert-ExactJsonObjectKeys {
+  param(
+    [Parameter(Mandatory = $true)] [object]$Value,
+    [Parameter(Mandatory = $true)] [string[]]$ExpectedKeys,
+    [Parameter(Mandatory = $true)] [string]$Context
+  )
+  if ($Value -is [System.Array]) { throw "$Context is not one JSON object." }
+  $actualKeys = @($Value.PSObject.Properties | ForEach-Object { [string]$_.Name })
+  if ($actualKeys.Count -ne $ExpectedKeys.Count) {
+    throw "$Context contains missing or unexpected fields."
+  }
+  foreach ($expectedKey in $ExpectedKeys) {
+    if (@($actualKeys | Where-Object { $_ -ceq $expectedKey }).Count -ne 1) {
+      throw "$Context contains missing or unexpected fields."
+    }
+  }
+}
+
+function Remove-RetailLensReparseFreeTree([string]$Path, [string]$Context) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $items = @(Get-Item -LiteralPath $Path -Force; Get-ChildItem -LiteralPath $Path -Recurse -Force)
+  if (@($items | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+    throw "$Context contains a reparse point and cannot be recursively deleted."
+  }
+  Remove-Item -LiteralPath $Path -Recurse -Force
+  if (Test-Path -LiteralPath $Path) { throw "$Context remained after recursive cleanup." }
+}
+
 $resolvedArtifacts = (Resolve-Path -LiteralPath $ArtifactDirectory).Path
 $version = [string](Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) "package.json") -Raw | ConvertFrom-Json).version
 $releaseName = "RetailDecisionStudioByLAIZEYU-$version-x64-portable-directory"
@@ -191,12 +219,18 @@ try {
   $proofOwned = $true
   $nonce = [Guid]::NewGuid().ToString("D").ToLowerInvariant()
   $probeCreatedAt = [DateTimeOffset]::UtcNow
-  [ordered]@{
-    schemaVersion = 1
+  $portableReadinessSchemaVersion = 2
+  $portableCaptureStoreScreenshots = $false
+  $portableScreenshotRound = 0
+  $portableProbe = [ordered]@{
+    schemaVersion = $portableReadinessSchemaVersion
     candidateSha256 = $candidateHash
+    captureStoreScreenshots = $portableCaptureStoreScreenshots
     nonce = $nonce
+    screenshotRound = $portableScreenshotRound
     version = $version
-  } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $proofDirectory "probe.json") -Encoding utf8
+  }
+  $portableProbe | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $proofDirectory "probe.json") -Encoding utf8
 
   $launchedProcess = Start-Process -FilePath $installedExecutable -PassThru
   $readyPath = Join-Path $proofDirectory "ui_ready.json"
@@ -223,8 +257,20 @@ try {
     Start-Sleep -Milliseconds 400
   }
   if (-not $ready -or -not $health -or -not $listener) {
-    throw "Installed portable app readiness timed out after 60 seconds."
+    $readyObserved = $null -ne $ready
+    $healthObserved = $null -ne $health
+    $listenerObserved = $null -ne $listener
+    throw "Installed portable app readiness timed out after 60 seconds (ready=$readyObserved; health=$healthObserved; listener=$listenerObserved)."
   }
+  $portableReadyExpectedKeys = @(
+    "author", "candidateSha256", "captureStoreScreenshots", "dom", "nonce",
+    "processId", "product", "readyAt", "schemaVersion", "screenshotRound", "version"
+  )
+  $portableDomExpectedKeys = @(
+    "authorVisible", "privacyEntryVisible", "productNameVisible", "rootContentLength", "titleMatches"
+  )
+  Assert-ExactJsonObjectKeys -Value $ready -ExpectedKeys $portableReadyExpectedKeys -Context "Installed portable app readiness evidence"
+  Assert-ExactJsonObjectKeys -Value $ready.dom -ExpectedKeys $portableDomExpectedKeys -Context "Installed portable app DOM evidence"
   $listenerPid = [long]$listener.OwningProcess
   $listenerProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction Stop
   if (
@@ -240,12 +286,17 @@ try {
     $health.status -cne "ok" -or
     $health.service -cne "RetailLens API" -or
     [long]$health.processId -ne $listenerPid -or
-    $ready.schemaVersion -ne 1 -or
+    -not ($ready.schemaVersion -is [int] -or $ready.schemaVersion -is [long]) -or
+    [long]$ready.schemaVersion -ne $portableReadinessSchemaVersion -or
     $ready.product -cne "Retail Decision Studio by LAI ZEYU" -or
     $ready.author -cne "LAI ZEYU（来泽宇）" -or
     $ready.version -cne $version -or
     $ready.candidateSha256 -cne $candidateHash -or
+    -not ($ready.captureStoreScreenshots -is [bool]) -or
+    $ready.captureStoreScreenshots -ne $portableCaptureStoreScreenshots -or
     $ready.nonce -cne $nonce -or
+    -not ($ready.screenshotRound -is [int] -or $ready.screenshotRound -is [long]) -or
+    [long]$ready.screenshotRound -ne $portableScreenshotRound -or
     [long]$ready.processId -ne $listenerPid -or
     $ready.dom.titleMatches -ne $true -or
     $ready.dom.productNameVisible -ne $true -or
@@ -271,7 +322,7 @@ try {
     -Context "Portable readiness process shutdown" | Out-Null
   $launchedProcess.Dispose()
   $launchedProcess = $null
-  Remove-Item -LiteralPath $proofDirectory -Recurse -Force
+  Remove-RetailLensReparseFreeTree -Path $proofDirectory -Context "Portable readiness proof directory"
   $proofOwned = $false
   if (@(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 47824 -State Listen -ErrorAction SilentlyContinue).Count -ne 0) {
     throw "Portable readiness listener remained after bounded process-tree shutdown."
@@ -322,7 +373,7 @@ try {
   }
   Invoke-Round2CleanupAction "proof directory" {
     if ($preflightPassed -and $proofOwned -and (Test-Path -LiteralPath $proofDirectory)) {
-      Remove-Item -LiteralPath $proofDirectory -Recurse -Force
+      Remove-RetailLensReparseFreeTree -Path $proofDirectory -Context "Round 2 proof directory"
     }
   }
   Invoke-Round2CleanupAction "product processes" {
@@ -351,7 +402,7 @@ try {
   }
   Invoke-Round2CleanupAction "extraction root" {
     if (Test-Path -LiteralPath $extractionRoot) {
-      Remove-Item -LiteralPath $extractionRoot -Recurse -Force
+      Remove-RetailLensReparseFreeTree -Path $extractionRoot -Context "Round 2 extraction root"
     }
   }
   Invoke-Round2CleanupAction "final portable residue recheck" {

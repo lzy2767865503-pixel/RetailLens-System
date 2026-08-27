@@ -23,8 +23,8 @@ if (
 }
 foreach ($path in @($expectedInstall, $expectedUserData)) {
   if (Test-Path -LiteralPath $path) {
-    $item = Get-Item -LiteralPath $path -Force
-    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    $items = @(Get-Item -LiteralPath $path -Force; Get-ChildItem -LiteralPath $path -Recurse -Force)
+    if (@($items | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
       throw "Portable uninstall refuses to traverse a reparse point: $path"
     }
     Remove-Item -LiteralPath $path -Recurse -Force

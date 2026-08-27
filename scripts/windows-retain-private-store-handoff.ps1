@@ -5,6 +5,9 @@ param(
   [string]$Round1RecordPath = "",
   [string]$Round2RecordPath = "",
   [string]$ApprovedWackFileVersion = "",
+  [string]$ApprovedWackSha256 = "",
+  [string]$ApprovedWackSignerSubject = "",
+  [string]$ApprovedWackSignerThumbprint = "",
   [switch]$ValidateOnly
 )
 
@@ -12,6 +15,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 . "$PSScriptRoot/windows-file-policy.ps1"
+. "$PSScriptRoot/windows-wack-policy.ps1"
 
 if (-not $IsWindows) { throw "Private Store handoff retention requires Windows." }
 
@@ -83,6 +87,15 @@ function New-ExactPrivateAcl {
   return $security
 }
 
+function Remove-ReparseFreePrivateTree([string]$Path, [string]$Label) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $items = @(Get-Item -LiteralPath $Path -Force; Get-ChildItem -LiteralPath $Path -Recurse -Force)
+  if (@($items | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+    throw "$Label contains a reparse point and cannot be recursively deleted."
+  }
+  Remove-Item -LiteralPath $Path -Recurse -Force
+}
+
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $exactPrivateRoot = [System.IO.Path]::GetFullPath($PrivateRoot).TrimEnd("\")
 if (-not [System.IO.Path]::IsPathFullyQualified($exactPrivateRoot) -or $exactPrivateRoot.StartsWith("\\")) {
@@ -130,7 +143,10 @@ if (
   $env:GITHUB_RUN_ID -notmatch '^\d+$' -or
   $env:GITHUB_RUN_ATTEMPT -notmatch '^\d+$' -or
   $CommitSha -notmatch '^[0-9a-f]{40}$' -or
-  $ApprovedWackFileVersion -notmatch '^\d+(?:\.\d+){3}$'
+  $ApprovedWackFileVersion -notmatch '^\d+(?:\.\d+){3}$' -or
+  $ApprovedWackSha256 -notmatch '^[0-9a-f]{64}$' -or
+  $ApprovedWackSignerThumbprint -notmatch '^[0-9a-f]{40}$' -or
+  $ApprovedWackSignerSubject -notmatch '^[^\r\n]{10,500}$'
 ) { throw "Private Store handoff requires exact workflow, commit, and approved WACK identities." }
 foreach ($requiredPath in @($StatePath, $Round1RecordPath, $Round2RecordPath)) {
   if ([string]::IsNullOrWhiteSpace($requiredPath) -or -not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
@@ -203,6 +219,11 @@ if (
 ) { throw "Store screenshot handoff source inventory is not exact." }
 $screenshotManifestPath = Join-Path $screenshotSource "store-screenshot-capture.v1.json"
 $screenshotManifest = Get-Content -LiteralPath $screenshotManifestPath -Raw | ConvertFrom-Json
+Assert-ExactSchema $screenshotManifest @(
+  "candidateSha256", "captureSource", "dataset", "evidenceKind", "generatedAt", "height",
+  "images", "nonce", "privacyGatePassed", "schemaVersion", "screenshotCount",
+  "screenshotRound", "secretBearingInputCount", "sensitiveTextPatternCount", "version", "width"
+) "Store screenshot capture manifest"
 if (
   $screenshotManifest.schemaVersion -ne 1 -or
   $screenshotManifest.evidenceKind -cne "exact-packaged-store-candidate-screenshots" -or
@@ -217,30 +238,60 @@ if (
   [int]$screenshotManifest.width -ne 1366 -or [int]$screenshotManifest.height -ne 768 -or
   [int]$screenshotManifest.screenshotCount -ne 4 -or @($screenshotManifest.images).Count -ne 4
 ) { throw "Store screenshot capture manifest is not bound to the exact QA candidate and privacy gate." }
+$expectedViews = [ordered]@{
+  "01-assessment-demo.png" = "assessment-demo"
+  "02-enterprise-inputs.png" = "enterprise-inputs"
+  "03-executive-workpaper.png" = "executive-workpaper"
+  "04-strategy-matrices.png" = "strategy-matrices"
+}
+$seenScreenshotNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$seenScreenshotViews = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($image in @($screenshotManifest.images)) {
+  Assert-ExactSchema $image @("fileName", "height", "sha256", "size", "viewId", "width") "Store screenshot image record"
+  $imageName = [string]$image.fileName
+  $viewId = [string]$image.viewId
   $imagePath = Join-Path $screenshotSource ([string]$image.fileName)
   if (
-    [string]$image.fileName -cnotin $expectedScreenshotNames -or
+    -not $expectedViews.Contains($imageName) -or
+    -not $seenScreenshotNames.Add($imageName) -or
+    -not $seenScreenshotViews.Add($viewId) -or
+    $viewId -cne [string]$expectedViews[$imageName] -or
     [int]$image.width -ne 1366 -or [int]$image.height -ne 768 -or
+    [long]$image.size -lt 20000 -or [long]$image.size -gt 15000000 -or
     [string]$image.sha256 -notmatch '^[0-9a-f]{64}$' -or
     -not (Test-Path -LiteralPath $imagePath -PathType Leaf) -or
+    (Get-Item -LiteralPath $imagePath).Length -ne [long]$image.size -or
     (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$image.sha256
   ) { throw "Store screenshot bytes changed after exact packaged-app capture verification." }
+}
+if ($seenScreenshotNames.Count -ne 4 -or $seenScreenshotViews.Count -ne 4) {
+  throw "Store retention requires four unique exact screenshot filename/viewId pairs."
 }
 
 $round1 = Get-Content -LiteralPath (Resolve-Path -LiteralPath $Round1RecordPath).Path -Raw | ConvertFrom-Json
 $round2 = Get-Content -LiteralPath (Resolve-Path -LiteralPath $Round2RecordPath).Path -Raw | ConvertFrom-Json
 foreach ($round in @($round1, $round2)) {
+  Assert-RetailLensApprovedAppcertIdentity `
+    -ActualFileVersion ([string]$round.appcert.fileVersion) `
+    -ActualSha256 ([string]$round.appcert.sha256) `
+    -ActualSignerSubject ([string]$round.appcert.signerSubject) `
+    -ActualSignerThumbprint ([string]$round.appcert.signerThumbprint) `
+    -ApprovedFileVersion $ApprovedWackFileVersion `
+    -ApprovedSha256 $ApprovedWackSha256 `
+    -ApprovedSignerSubject $ApprovedWackSignerSubject `
+    -ApprovedSignerThumbprint $ApprovedWackSignerThumbprint
   if (
-    $round.schemaVersion -ne 2 -or
+    $round.schemaVersion -ne 3 -or
     $round.repository -cne "lzy2767865503-pixel/RetailLens-System" -or
     $round.commitSha -cne $CommitSha -or
     [string]$round.workflowRunId -cne [string]$env:GITHUB_RUN_ID -or
     [string]$round.workflowRunAttempt -cne [string]$env:GITHUB_RUN_ATTEMPT -or
     $round.package.sha256 -cne [string]$state.candidateSha256 -or
     $round.appcert.approvedFileVersion -cne $ApprovedWackFileVersion -or
+    $round.appcert.approvedSha256 -cne $ApprovedWackSha256 -or
+    $round.appcert.approvedSignerSubject -cne $ApprovedWackSignerSubject -or
+    $round.appcert.approvedSignerThumbprint -cne $ApprovedWackSignerThumbprint -or
     $round.appcert.fileVersion -cne $ApprovedWackFileVersion -or
-    $round.appcert.sha256 -notmatch '^[0-9a-f]{64}$' -or
     $round.report.sha256 -notmatch '^[0-9a-f]{64}$' -or
     $round.runId -notmatch '^[0-9a-f-]{36}$'
   ) { throw "WACK lineage record is not exact for private Store retention." }
@@ -298,7 +349,7 @@ try {
       (Get-FileHash -LiteralPath $screenshotManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
   ) { throw "Retained Store screenshot capture manifest changed during private handoff copy." }
   $lineage = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     product = "Retail Decision Studio by LAI ZEYU"
     author = "LAI ZEYU（来泽宇）"
     publisherDisplayName = "LAI ZEYU"
@@ -320,7 +371,10 @@ try {
     lifecycleRounds = 2
     wackRounds = 2
     approvedWackFileVersion = $ApprovedWackFileVersion
-    appcertSha256 = [string]$round1.appcert.sha256
+    approvedWackSha256 = $ApprovedWackSha256
+    approvedWackSignerSubject = $ApprovedWackSignerSubject
+    approvedWackSignerThumbprint = $ApprovedWackSignerThumbprint
+    appcertSha256 = $ApprovedWackSha256
     wackRound1RunId = [string]$round1.runId
     wackRound1ReportSha256 = [string]$round1.report.sha256
     wackRound2RunId = [string]$round2.runId
@@ -365,10 +419,10 @@ try {
   Move-Item -LiteralPath $retentionStateTemp -Destination $resolvedStatePath -Force
 } catch {
   if ($moved -and (Test-Path -LiteralPath $finalRoot)) {
-    Remove-Item -LiteralPath $finalRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-ReparseFreePrivateTree -Path $finalRoot -Label "Failed final Store handoff"
   }
   if (Test-Path -LiteralPath $incompleteRoot) {
-    Remove-Item -LiteralPath $incompleteRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-ReparseFreePrivateTree -Path $incompleteRoot -Label "Failed incomplete Store handoff"
   }
   if (Test-Path -LiteralPath $retentionStateTemp) {
     Remove-Item -LiteralPath $retentionStateTemp -Force -ErrorAction SilentlyContinue

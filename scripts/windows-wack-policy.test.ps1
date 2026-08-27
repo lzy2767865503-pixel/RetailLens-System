@@ -30,7 +30,41 @@ try {
       throw "WACK parser case $($case.Name) expected pass=$($case.Pass), observed pass=$passed."
     }
   }
+  $approvedIdentity = @{
+    ActualFileVersion = "10.0.26100.1"
+    ActualSha256 = "a" * 64
+    ActualSignerSubject = "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+    ActualSignerThumbprint = "b" * 40
+    ApprovedFileVersion = "10.0.26100.1"
+    ApprovedSha256 = "a" * 64
+    ApprovedSignerSubject = "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+    ApprovedSignerThumbprint = "b" * 40
+  }
+  Assert-RetailLensApprovedAppcertIdentity @approvedIdentity
+  foreach ($mutation in @(
+    @{ Name = "file-version"; Key = "ActualFileVersion"; Value = "10.0.26100.2" },
+    @{ Name = "sha256"; Key = "ActualSha256"; Value = ("c" * 64) },
+    @{ Name = "signer-subject"; Key = "ActualSignerSubject"; Value = "CN=Other, O=Microsoft Corporation" },
+    @{ Name = "signer-thumbprint"; Key = "ActualSignerThumbprint"; Value = ("d" * 40) },
+    @{ Name = "approved-file-version"; Key = "ApprovedFileVersion"; Value = "10.0.26100.2" },
+    @{ Name = "approved-sha256"; Key = "ApprovedSha256"; Value = ("c" * 64) },
+    @{ Name = "approved-signer-subject"; Key = "ApprovedSignerSubject"; Value = "CN=Other, O=Microsoft Corporation" },
+    @{ Name = "approved-signer-thumbprint"; Key = "ApprovedSignerThumbprint"; Value = ("d" * 40) },
+    @{ Name = "approved-hash-format"; Key = "ApprovedSha256"; Value = ("A" * 64) }
+  )) {
+    $fixture = @{} + $approvedIdentity
+    $fixture[$mutation.Key] = $mutation.Value
+    $rejected = $false
+    try { Assert-RetailLensApprovedAppcertIdentity @fixture } catch { $rejected = $true }
+    if (-not $rejected) { throw "Approved appcert negative fixture $($mutation.Name) was accepted." }
+  }
   Write-Host "WACK complete-report policy fixtures passed. No fake AppX or cryptographic-attestation claim is used."
 } finally {
-  Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $testRoot) {
+    $cleanupItems = @(Get-Item -LiteralPath $testRoot -Force; Get-ChildItem -LiteralPath $testRoot -Recurse -Force)
+    if (@($cleanupItems | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+      throw "WACK policy fixture root contains a reparse point and cannot be recursively deleted."
+    }
+    Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }

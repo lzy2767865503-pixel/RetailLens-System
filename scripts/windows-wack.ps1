@@ -10,6 +10,9 @@ param(
   [Parameter(Mandatory = $true)] [string]$WorkflowRunId,
   [Parameter(Mandatory = $true)] [string]$WorkflowRunAttempt,
   [Parameter(Mandatory = $true)] [string]$ApprovedWackFileVersion,
+  [Parameter(Mandatory = $true)] [string]$ApprovedWackSha256,
+  [Parameter(Mandatory = $true)] [string]$ApprovedWackSignerSubject,
+  [Parameter(Mandatory = $true)] [string]$ApprovedWackSignerThumbprint,
   [ValidateRange(30, 900)] [int]$ResetTimeoutSeconds = 300,
   [ValidateRange(300, 7200)] [int]$TestTimeoutSeconds = 3600
 )
@@ -126,12 +129,10 @@ if (-not (Test-Path -LiteralPath $kitPath -PathType Leaf)) {
 }
 $kitItem = Get-Item -LiteralPath $kitPath -Force
 $canonicalFileVersion = $kitItem.VersionInfo.FileVersionRaw.ToString()
-if (
-  [string]::IsNullOrWhiteSpace($ApprovedWackFileVersion) -or
-  $ApprovedWackFileVersion -notmatch '^\d+(?:\.\d+){3}$' -or
-  $canonicalFileVersion -cne $ApprovedWackFileVersion -or
-  ($kitItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
-) { throw "Canonical appcert.exe does not match RETAILLENS_APPROVED_WACK_FILE_VERSION." }
+if ($kitItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+  throw "Canonical appcert.exe is a reparse point."
+}
+$canonicalSha256 = (Get-FileHash -LiteralPath $kitPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $kitSignature = Get-AuthenticodeSignature -LiteralPath $kitPath
 if (
   $kitSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
@@ -141,6 +142,17 @@ if (
     $_.ObjectId.Value -eq "1.3.6.1.5.5.7.3.3"
   })
 ) { throw "appcert.exe is not trusted Microsoft-signed code." }
+$canonicalSignerSubject = [string]$kitSignature.SignerCertificate.Subject
+$canonicalSignerThumbprint = $kitSignature.SignerCertificate.Thumbprint.Replace(" ", "").ToLowerInvariant()
+Assert-RetailLensApprovedAppcertIdentity `
+  -ActualFileVersion $canonicalFileVersion `
+  -ActualSha256 $canonicalSha256 `
+  -ActualSignerSubject $canonicalSignerSubject `
+  -ActualSignerThumbprint $canonicalSignerThumbprint `
+  -ApprovedFileVersion $ApprovedWackFileVersion `
+  -ApprovedSha256 $ApprovedWackSha256 `
+  -ApprovedSignerSubject $ApprovedWackSignerSubject `
+  -ApprovedSignerThumbprint $ApprovedWackSignerThumbprint
 
 $sessionId = (Get-Process -Id $PID).SessionId
 $sessionExplorer = Get-Process explorer -ErrorAction SilentlyContinue |
@@ -229,13 +241,16 @@ try {
   $finishedAt = [DateTimeOffset]::UtcNow
   $finalPackageHash = (Get-FileHash -LiteralPath $resolvedPackage -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($finalPackageHash -cne $packageSha256) { throw "WACK changed the exact signed candidate bytes." }
+  if ((Get-FileHash -LiteralPath $kitPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $canonicalSha256) {
+    throw "Canonical appcert.exe changed during WACK execution."
+  }
   $reportSha256 = (Get-FileHash -LiteralPath $resolvedReport -Algorithm SHA256).Hash.ToLowerInvariant()
   $testInventoryJson = $reportPolicy.Tests | ConvertTo-Json -Depth 4 -Compress
   $testInventorySha256 = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($testInventoryJson))
   ).ToLowerInvariant()
   [ordered]@{
-    schemaVersion = 2
+    schemaVersion = 3
     evidenceKind = "private-same-run-record"
     cryptographicallyAttested = $false
     transferable = $false
@@ -272,10 +287,13 @@ try {
     }
     appcert = [ordered]@{
       approvedFileVersion = $ApprovedWackFileVersion
+      approvedSha256 = $ApprovedWackSha256
+      approvedSignerSubject = $ApprovedWackSignerSubject
+      approvedSignerThumbprint = $ApprovedWackSignerThumbprint
       fileVersion = $canonicalFileVersion
-      sha256 = (Get-FileHash -LiteralPath $kitPath -Algorithm SHA256).Hash.ToLowerInvariant()
-      signerSubject = $kitSignature.SignerCertificate.Subject
-      signerThumbprint = $kitSignature.SignerCertificate.Thumbprint.ToLowerInvariant()
+      sha256 = $canonicalSha256
+      signerSubject = $canonicalSignerSubject
+      signerThumbprint = $canonicalSignerThumbprint
     }
     runId = $runId
     interactiveSessionId = $sessionId
@@ -291,6 +309,10 @@ try {
   throw
 } finally {
   if (Test-Path -LiteralPath $manifestRoot) {
+    $manifestItems = @(Get-Item -LiteralPath $manifestRoot -Force; Get-ChildItem -LiteralPath $manifestRoot -Recurse -Force)
+    if (@($manifestItems | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+      throw "WACK manifest inspection root contains a reparse point and cannot be recursively deleted."
+    }
     Remove-Item -LiteralPath $manifestRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
 }

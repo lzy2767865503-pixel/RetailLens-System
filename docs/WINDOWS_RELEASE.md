@@ -87,6 +87,9 @@ The protected `microsoft-store` environment supplies:
 | `RETAILLENS_CERTIFICATION_OPENAI_API_KEY` | secret | Dedicated, limited, expiring, independently revocable reviewer key |
 | `RETAILLENS_CERTIFICATION_LIVE_API_CHECK_REQUIRED` | variable | exactly `true` |
 | `RETAILLENS_APPROVED_WACK_FILE_VERSION` | variable | Exact four-part `FileVersionRaw` of the approved canonical `appcert.exe` |
+| `RETAILLENS_APPROVED_WACK_SHA256` | variable | Exact lowercase SHA-256 of that approved `appcert.exe` |
+| `RETAILLENS_APPROVED_WACK_SIGNER_SUBJECT` | variable | Exact case-sensitive Microsoft signer Subject |
+| `RETAILLENS_APPROVED_WACK_SIGNER_THUMBPRINT` | variable | Exact lowercase signer-certificate thumbprint |
 | `RETAILLENS_PRIVATE_STORE_HANDOFF_ROOT` | variable | Pre-provisioned local fixed-NTFS `RetailLensStoreHandoff` directory with protected exact runner/SYSTEM/Administrators ACL |
 | Other `RETAILLENS_CERTIFICATION_*` declarations | variables | exactly match the private-note, key-scope, connection, interpretation, generative-AI, and backup declarations enforced by the workflow |
 
@@ -134,9 +137,10 @@ under the same run root. `scripts/windows-wack.ps1`:
   failure, not-run, missing, duplicate, orphaned, or ambiguous results fail;
 - records the exact package/report/AppCert hashes, complete test inventory,
   workflow run identity, protected-main commit, interactive session, and times.
-- accepts only the canonical Windows Kits `appcert.exe`, a valid Microsoft code
-  signature, and the exact protected `RETAILLENS_APPROVED_WACK_FILE_VERSION`;
-  both rounds must record the same approved FileVersion and AppCert SHA-256.
+- before the first `appcert` process starts, accepts only the canonical Windows
+  Kits path, a valid Microsoft code signature, and the complete protected tuple:
+  exact FileVersion, SHA-256, signer Subject, and signer Thumbprint; both immediate
+  record verifiers and final private retention repeat all four exact comparisons.
 
 After both WACK and lifecycle rounds pass,
 `scripts/windows-retain-private-store-handoff.ps1` rechecks the unsigned/QA
@@ -166,6 +170,11 @@ the exact local NTFS boundary in this workflow. A human may transfer only the
 four verified, privacy-gated PNGs from that handoff to Partner Center; GitHub
 artifact upload is intentionally still disabled because the same Store job also
 handles the unsigned package and protected certification configuration.
+The parser inventories every test reported under the single requirements tree
+and rejects duplicates, orphans, missing results, and non-whitelisted outcomes;
+it does not claim a hard-coded universal Microsoft test-name catalog because that
+catalog changes with the approved WACK build. The approved executable tuple and
+the report's complete same-run inventory are the enforced boundaries.
 If the labelled interactive runner is unavailable, Store validation remains
 blocked; there is no hand-edited external-attestation fallback.
 
@@ -212,26 +221,46 @@ The protected `github-release` environment and runner configuration supply:
 | Name | Kind | Requirement |
 |---|---|---|
 | `RETAILLENS_RELEASE_HANDOFF_ROOT` | variable | Pre-provisioned same-host local fixed-NTFS `RetailLensReleaseHandoff` root |
-| `RETAILLENS_RELEASE_BUILD_SID` / `...SIGNING_SID` / `...PUBLISHER_SID` | variables | Three distinct Windows service-account SIDs |
+| `RETAILLENS_RELEASE_BUILD_SID` / `...SIGNING_SID` / `...VERIFIER_SID` / `...PUBLISHER_SID` | variables | Four distinct non-administrator Windows service-account SIDs |
 | `RETAILLENS_TRUSTED_SIGNING_HARNESS_PATH` | variable | Pre-provisioned out-of-repository signing harness on the clean signing runner |
 | `RETAILLENS_TRUSTED_SIGNING_HARNESS_SHA256` | variable | Exact pinned harness hash |
+| `RETAILLENS_SIGNING_BROKER_POLICY_SHA256` | variable | Exact one-shot policy binding signing SID, pinned harness hash, sign-only command, workflow run, and input-tree hash |
+| `RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH` | variable | Pre-provisioned out-of-repository client for the audited SYSTEM handoff broker; never a repository or runner-temp path |
+| `RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256` | variable | Exact lowercase SHA-256 of that broker client on build, signer, and verifier runners |
+| `RETAILLENS_HANDOFF_BROKER_POLICY_SHA256` | variable | Exact audited policy binding the three permitted stage transitions to run/attempt, source commit, sender/receiver SIDs, access mode, and whole-handoff tree hash |
+| `RETAILLENS_TRUSTED_VERIFIER_HARNESS_PATH` / `...SHA256` | variables | Pinned out-of-repository lifecycle harness on the no-signing verifier |
 | `RETAILLENS_ESIGNER_CKA_INSTALLER_SHA256` / `...UNINSTALLER_SHA256` | variables | Exact hashes of the verified CKA installer and the installed uninstaller |
 | `WINDOWS_SIGNER_SUBJECT` / `WINDOWS_SIGNER_THUMBPRINT` | variables | Exact publicly trusted LAI author certificate identity |
 | `RETAILLENS_CERTIFICATION_OPENAI_MODEL` | variable | Exact public model selected for both source/capability rounds |
 | `RETAILLENS_CERTIFICATION_OPENAI_API_KEY` | secret | Dedicated limited/revocable key used only in the non-signing build job |
 
-There are three separate organization runner groups and service accounts:
+There are four separate organization runner groups and non-administrator service accounts:
 
 1. `retaillens-trusted-windows-build` checks out and executes repository code,
    tests twice, builds once, and atomically writes the unsigned tree to the
-   private local ACL handoff. It has no CKA credential access.
+   private local ACL handoff. It has no CKA credential access. It then asks the
+   separately pinned SYSTEM handoff broker to quarantine the root, remove build
+   access, require zero build-SID open handles, rehash the frozen tree, and only
+   then expose it exclusively to the signer.
 2. `retaillens-trusted-windows-signing` is fresh, ephemeral, and no-checkout. It
    accepts only the exact same-host handoff and pinned out-of-repository harness.
    Reusable SSL.com credentials and the TOTP seed are supplied only through a
    machine-bound broker inside that harness; they never enter workflow
-   environment variables, repository scripts, or command lines.
-3. `retaillens-trusted-windows-publisher` is also fresh and no-checkout. It can
-   read only the signed private handoff and is the sole job with `contents: write`.
+   environment variables, repository scripts, or command lines. The broker
+   accepts only the exact signer SID, pinned harness hash, sign-only command,
+   workflow run/attempt, and input-tree hash through a consumed one-shot grant;
+   another process or replay under the same account is denied. The signer never launches
+   the candidate. Only after static signature checks and complete CKA cleanup
+   does the SYSTEM broker perform the same quarantine/revoke/zero-open-handle/
+   rehash/grant protocol for an exclusive verifier handoff.
+3. `retaillens-trusted-windows-verifier` is fresh, no-checkout, and has neither
+   signing credentials nor provider/broker access. Its separately pinned harness
+   runs two lifecycle rounds on one signed archive SHA-256, proves cleanup, then
+   asks that broker to quarantine and rehash a new verified handoff, remove the
+   verifier completely, and grant the publisher only `ReadAndExecute`.
+4. `retaillens-trusted-windows-publisher` is fresh and no-checkout. It has only
+   `ReadAndExecute` on the verified frozen handoff and is the sole job with
+   `contents: write`; it cannot replace, delete, or change ACLs on those bytes.
 
 Unsigned bytes never use `actions/upload-artifact` or any other GitHub transfer.
 The timestamp is pinned to `http://ts.ssl.com`. CKA `1.0.6` is pinned by archive,
@@ -239,7 +268,16 @@ installer, and installed-uninstaller hashes. A schema-v3 cleanup receipt is
 mandatory: it proves CKA unload, certificate `DeleteKey`, private-key-container,
 master-key, `%APPDATA%\eSignerCKA`, process, provider, registry, installer, and
 uninstaller cleanup, then independently rechecks every baseline. A missing or
-mismatched receipt blocks the signed handoff. No PFX is accepted or exported.
+mismatched receipt blocks the signer-to-verifier handoff. No PFX is accepted or
+exported. The shared fixed-NTFS root is globally serialized and never grants all
+four runner SIDs FullControl. Each stage transition first changes the fixed root
+to a SYSTEM/Administrators-only quarantine, removes the previous SID from the
+root and every child, refuses any source-SID open handle, rechecks the whole-tree
+SHA-256 while the receiver still cannot traverse the root, and grants the receiver
+only after that check. The receiver then independently requires SYSTEM ownership,
+the exact protected ACL on root and children, no reparse point, and the same
+whole-tree SHA-256. SYSTEM and local Administrators retain recovery rights, but
+all four runner identities are required not to belong to that group.
 
 Official eSigner CKA integration guide:
 
@@ -255,10 +293,12 @@ After `electron-builder --dir`, the pinned external signing harness discovers
 every real PE by content, not extension, across EXE, DLL, `.node`, renamed, or
 disguised files. It removes any pre-existing embedded third-party signature,
 proves no signer remains, and invokes CKA-backed SignTool to create one
-author-owned timestamped signature on each file. Only then does it create the ZIP
-and run two lifecycle rounds on the identical final archive SHA-256. The workflow
-independently expands that archive and verifies every visible MZ/PE before private
-handoff and again in the publisher account.
+author-owned timestamped signature on each file. It creates the ZIP and performs
+static signature verification only; candidate execution is forbidden and recorded
+as zero. After CKA cleanup and exclusive ACL transfer, the independent no-signing
+verifier runs two lifecycle rounds on the identical archive SHA-256. The publisher
+then independently expands that same read-only archive and verifies every visible
+MZ/PE again.
 
 `scripts/windows-verify-authenticode.ps1` safely extracts the ZIP, rejects path
 traversal, case-insensitive duplicate entries, symlinks, nested archives, and
@@ -296,13 +336,18 @@ performs two bounded portable lifecycle rounds on one temporary unsigned ZIP:
 Round 2 recreates the locked dependency installation and repeats audit, unit,
 attribution, metadata, policy, desktop, and live OpenAI gates. Both OpenAI rounds
 bind the same commit/model/unsigned payload tree with distinct response IDs and
-nonce hashes. The build account then atomically hands that tree to the signing
-account. The pinned harness signs once and its own two lifecycle rounds must bind
-the identical final archive SHA-256 before cleanup evidence and a signed private
-handoff can be created.
+nonce hashes. The build account freezes a whole-handoff hash and requests the
+audited SYSTEM broker's quarantine/revoke/rehash/grant transition to the signing
+account. The signer independently rehashes before use, signs once, reports zero
+candidate executions, statically verifies signatures, completes and rechecks CKA
+cleanup, and only then requests the same transition for the signed bytes to the
+no-signing verifier. The verifier's
+separately pinned harness runs two lifecycle rounds on the identical final archive
+SHA-256, verifies process cleanup and denied signing-broker/provider access, and
+creates the publisher-read-only frozen handoff through that fail-closed broker.
 
 The write-capable publisher checks out no repository code. It independently
-revalidates the signed handoff, archive hash, every visible PE signer/timestamp,
+revalidates the lifecycle-verified read-only handoff, archive hash, every visible PE signer/timestamp,
 current protected main, peeled immutable tag, repository ID `1313443623`, and the
 live no-bypass rulesets. It creates a draft only with `POST /releases`; ownership
 exists only when the exact call returns HTTP `201` with a valid numeric `id`,
@@ -316,8 +361,10 @@ content type, size, digest, URL, and authenticated exact asset-ID redownload has
 must match. Only then does an exact-ID PATCH set `draft=false`. Rollback uses only
 the frozen immutable Release ID/node ID/creation time/author fields; it never
 depends on mutable title, body, or marker text. Failures return only that exact
-owned Release to a confirmed private draft. The private signed handoff is removed
-only after final exact-ID public verification.
+owned Release to a confirmed private draft. The publisher cannot delete or modify
+the private verified handoff; it rehashes it after publication. SYSTEM or local
+Administrators must archive/remove it and reset the empty root to build-only ACL
+before a later globally serialized release run.
 
 Repository tag ruleset `21631606` (`Immutable Windows release tags`) is also an
 exact publication gate: it must remain active for `refs/tags/v*`, contain only
@@ -337,16 +384,22 @@ single-owner repository impossible to merge.
 - SSL.com must issue a publicly trusted cloud code-signing certificate whose
   exact validated signer identity satisfies `LAI ZEYU` or `来泽宇`.
 - The repository must be transferred to a GitHub organization that can enforce
-  three restricted runner groups for separate build, signing, and publisher
+  four restricted runner groups for separate build, signing, signed-verifier, and publisher
   service accounts; personal public repositories cannot provide this boundary.
-- Same-host ephemeral Windows runners, distinct SIDs, the fixed-NTFS exact-ACL
-  handoff root, and the pinned out-of-repository machine-bound signing
-  harness/broker must be provisioned and independently audited.
-- Exact harness, CKA installer/uninstaller, signer Subject, and signer thumbprint
-  protected variables must be configured. Static CKA credentials must not be
-  added to GitHub secrets or workflow environment variables.
-- Both source/lifecycle rounds and the harness's two signed lifecycle rounds must
-  pass natively on Windows.
+- Same-host ephemeral Windows runners, distinct SIDs, the SYSTEM-owned fixed-NTFS
+  exact-ACL handoff root, pinned SYSTEM handoff-broker client and policy, staged
+  quarantine/revoke/zero-open-handle/rehash/grant/reset procedure, pinned sign-only
+  machine-bound harness/broker, and pinned no-signing verifier harness must be
+  provisioned and independently audited. Without this external broker the workflow
+  fails closed; a shared multi-SID FullControl root is not an accepted fallback.
+- Exact signing/verifier/handoff-broker client and policy hashes, CKA
+  installer/uninstaller hashes, signer Subject/thumbprint, and the approved WACK
+  FileVersion/SHA-256/signer-Subject/signer-thumbprint tuple must be configured as
+  protected variables. Static CKA credentials must not be added to GitHub secrets
+  or workflow environment variables.
+- Both unsigned source/lifecycle rounds and the isolated verifier's two signed
+  lifecycle rounds must pass natively on Windows; the signer must report zero
+  candidate executions.
 - Partner Center identity reservation is complete for Product ID
   `9NVNLQWQBKHD`; the remaining Store submission fields and package run are not.
 - A dedicated limited/revocable reviewer API key must pass the live model and

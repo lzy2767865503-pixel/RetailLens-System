@@ -1,6 +1,32 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Assert-RetailLensApprovedAppcertIdentity {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)] [string]$ActualFileVersion,
+    [Parameter(Mandatory = $true)] [string]$ActualSha256,
+    [Parameter(Mandatory = $true)] [string]$ActualSignerSubject,
+    [Parameter(Mandatory = $true)] [string]$ActualSignerThumbprint,
+    [Parameter(Mandatory = $true)] [string]$ApprovedFileVersion,
+    [Parameter(Mandatory = $true)] [string]$ApprovedSha256,
+    [Parameter(Mandatory = $true)] [string]$ApprovedSignerSubject,
+    [Parameter(Mandatory = $true)] [string]$ApprovedSignerThumbprint
+  )
+  if (
+    $ApprovedFileVersion -notmatch '^\d+(?:\.\d+){3}$' -or
+    $ApprovedSha256 -notmatch '^[0-9a-f]{64}$' -or
+    $ApprovedSignerThumbprint -notmatch '^[0-9a-f]{40}$' -or
+    $ApprovedSignerSubject -notmatch '^[^\r\n]{10,500}$' -or
+    $ActualFileVersion -cne $ApprovedFileVersion -or
+    $ActualSha256 -cne $ApprovedSha256 -or
+    $ActualSignerSubject -cne $ApprovedSignerSubject -or
+    $ActualSignerThumbprint -cne $ApprovedSignerThumbprint
+  ) {
+    throw "Canonical appcert.exe version/hash/signer identity does not equal the protected approval tuple."
+  }
+}
+
 function Read-RetailLensCompleteWackReport {
   [CmdletBinding()]
   param(

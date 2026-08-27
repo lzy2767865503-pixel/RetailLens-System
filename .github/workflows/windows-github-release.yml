@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: retaillens-trusted-windows-${{ inputs.tag }}
+  group: retaillens-trusted-windows-release-handoff
   cancel-in-progress: false
 
 jobs:
@@ -38,12 +38,18 @@ jobs:
       commit_sha: ${{ steps.release_identity.outputs.commit_sha }}
       unsigned_handoff_id: ${{ steps.private_handoff.outputs.handoff_id }}
       unsigned_payload_tree_sha256: ${{ steps.private_handoff.outputs.unsigned_payload_tree_sha256 }}
+      unsigned_handoff_tree_sha256: ${{ steps.private_handoff.outputs.handoff_tree_sha256 }}
       openai_model: ${{ steps.openai_round_1.outputs.model }}
     env:
       RELEASE_TAG: ${{ inputs.tag }}
       RETAILLENS_RELEASE_HANDOFF_ROOT: ${{ vars.RETAILLENS_RELEASE_HANDOFF_ROOT }}
+      RETAILLENS_RELEASE_BUILD_SID: ${{ vars.RETAILLENS_RELEASE_BUILD_SID }}
       RETAILLENS_RELEASE_SIGNING_SID: ${{ vars.RETAILLENS_RELEASE_SIGNING_SID }}
+      RETAILLENS_RELEASE_VERIFIER_SID: ${{ vars.RETAILLENS_RELEASE_VERIFIER_SID }}
       RETAILLENS_RELEASE_PUBLISHER_SID: ${{ vars.RETAILLENS_RELEASE_PUBLISHER_SID }}
+      RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH: ${{ vars.RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH }}
+      RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256: ${{ vars.RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256 }}
+      RETAILLENS_HANDOFF_BROKER_POLICY_SHA256: ${{ vars.RETAILLENS_HANDOFF_BROKER_POLICY_SHA256 }}
       RETAILLENS_CERTIFICATION_OPENAI_MODEL: ${{ vars.RETAILLENS_CERTIFICATION_OPENAI_MODEL }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
@@ -82,10 +88,17 @@ jobs:
           $tagCommit = (git rev-list -n 1 $env:RELEASE_TAG).Trim().ToLowerInvariant()
           if ($tagCommit -cne $remoteMain) { throw 'Release tag must peel to the exact current protected main commit.' }
           if (
+            $env:RETAILLENS_RELEASE_BUILD_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
             $env:RETAILLENS_RELEASE_SIGNING_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
+            $env:RETAILLENS_RELEASE_VERIFIER_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
             $env:RETAILLENS_RELEASE_PUBLISHER_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
-            $env:RETAILLENS_RELEASE_SIGNING_SID -ceq $env:RETAILLENS_RELEASE_PUBLISHER_SID
-          ) { throw 'Protected signing/publisher runner SIDs are absent, malformed, or not distinct.' }
+            @(@(
+              $env:RETAILLENS_RELEASE_BUILD_SID,
+              $env:RETAILLENS_RELEASE_SIGNING_SID,
+              $env:RETAILLENS_RELEASE_VERIFIER_SID,
+              $env:RETAILLENS_RELEASE_PUBLISHER_SID
+            ) | Sort-Object -Unique).Count -ne 4
+          ) { throw 'Protected build/signing/verifier/publisher runner SIDs are absent, malformed, or not distinct.' }
           "commit_sha=$remoteMain" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "RETAILLENS_RELEASE_COMMIT=$remoteMain" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -267,31 +280,21 @@ jobs:
             -SourceCommit '${{ steps.release_identity.outputs.commit_sha }}' `
             -ReleaseTag $env:RELEASE_TAG `
             -RepositoryId 1313443623 `
+            -ExpectedBuildSid $env:RETAILLENS_RELEASE_BUILD_SID `
             -SigningSid $env:RETAILLENS_RELEASE_SIGNING_SID `
-            -PublisherSid $env:RETAILLENS_RELEASE_PUBLISHER_SID
+            -VerifierSid $env:RETAILLENS_RELEASE_VERIFIER_SID `
+            -PublisherSid $env:RETAILLENS_RELEASE_PUBLISHER_SID `
+            -HandoffBrokerPath $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH `
+            -HandoffBrokerSha256 $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256 `
+            -HandoffBrokerPolicySha256 $env:RETAILLENS_HANDOFF_BROKER_POLICY_SHA256
           if (
             $handoff.handoffId -notmatch '^retaillens-release-unsigned-\d+-\d+-[0-9a-f]{12}\.ready$' -or
-            $handoff.unsignedPayloadTreeSha256 -cne '${{ steps.unsigned_tree.outputs.unsigned_payload_tree_sha256 }}'
+            $handoff.unsignedPayloadTreeSha256 -cne '${{ steps.unsigned_tree.outputs.unsigned_payload_tree_sha256 }}' -or
+            $handoff.handoffTreeSha256 -notmatch '^[0-9a-f]{64}$'
           ) { throw 'Private unsigned handoff output differs from the twice-tested payload tree.' }
           "handoff_id=$($handoff.handoffId)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "unsigned_payload_tree_sha256=$($handoff.unsignedPayloadTreeSha256)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Remove workspace copies after private handoff
-        if: always()
-        shell: pwsh
-        run: |
-          foreach ($relative in @('release/windows', 'release/metadata')) {
-            $path = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE $relative))
-            $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\') + '\'
-            if (-not $path.StartsWith($workspace, [StringComparison]::OrdinalIgnoreCase)) { throw 'Workspace cleanup escaped its root.' }
-            if (Test-Path -LiteralPath $path) {
-              $item = Get-Item -LiteralPath $path -Force
-              $links = @(Get-ChildItem -LiteralPath $path -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
-              if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $links.Count -ne 0) { throw 'Workspace cleanup tree contains a reparse point.' }
-              Remove-Item -LiteralPath $path -Recurse -Force
-            }
-          }
-          Write-Host 'Unsigned Windows bytes were removed from the workspace and were never uploaded as a GitHub artifact.'
+          "handoff_tree_sha256=$($handoff.handoffTreeSha256)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   sign_private_candidate:
     name: Fresh no-checkout signing account with pinned external harness and mandatory CKA cleanup
@@ -317,17 +320,24 @@ jobs:
       archive_sha256: ${{ steps.signed_handoff.outputs.archive_sha256 }}
       signer_thumbprint: ${{ steps.signed_handoff.outputs.signer_thumbprint }}
       signing_evidence_sha256: ${{ steps.signed_handoff.outputs.signing_evidence_sha256 }}
+      signed_handoff_tree_sha256: ${{ steps.signed_handoff.outputs.handoff_tree_sha256 }}
     env:
       RELEASE_TAG: ${{ inputs.tag }}
       SOURCE_COMMIT: ${{ needs.build_private_unsigned_candidate.outputs.commit_sha }}
       UNSIGNED_HANDOFF_ID: ${{ needs.build_private_unsigned_candidate.outputs.unsigned_handoff_id }}
       EXPECTED_UNSIGNED_TREE_SHA256: ${{ needs.build_private_unsigned_candidate.outputs.unsigned_payload_tree_sha256 }}
+      EXPECTED_UNSIGNED_HANDOFF_TREE_SHA256: ${{ needs.build_private_unsigned_candidate.outputs.unsigned_handoff_tree_sha256 }}
       RETAILLENS_RELEASE_HANDOFF_ROOT: ${{ vars.RETAILLENS_RELEASE_HANDOFF_ROOT }}
       RETAILLENS_RELEASE_BUILD_SID: ${{ vars.RETAILLENS_RELEASE_BUILD_SID }}
       RETAILLENS_RELEASE_SIGNING_SID: ${{ vars.RETAILLENS_RELEASE_SIGNING_SID }}
+      RETAILLENS_RELEASE_VERIFIER_SID: ${{ vars.RETAILLENS_RELEASE_VERIFIER_SID }}
       RETAILLENS_RELEASE_PUBLISHER_SID: ${{ vars.RETAILLENS_RELEASE_PUBLISHER_SID }}
       RETAILLENS_TRUSTED_SIGNING_HARNESS_PATH: ${{ vars.RETAILLENS_TRUSTED_SIGNING_HARNESS_PATH }}
       RETAILLENS_TRUSTED_SIGNING_HARNESS_SHA256: ${{ vars.RETAILLENS_TRUSTED_SIGNING_HARNESS_SHA256 }}
+      RETAILLENS_SIGNING_BROKER_POLICY_SHA256: ${{ vars.RETAILLENS_SIGNING_BROKER_POLICY_SHA256 }}
+      RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH: ${{ vars.RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH }}
+      RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256: ${{ vars.RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256 }}
+      RETAILLENS_HANDOFF_BROKER_POLICY_SHA256: ${{ vars.RETAILLENS_HANDOFF_BROKER_POLICY_SHA256 }}
       RETAILLENS_WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_SIGNER_SUBJECT }}
       RETAILLENS_WINDOWS_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_SIGNER_THUMBPRINT }}
       RETAILLENS_ESIGNER_CKA_VERSION: 1.0.6
@@ -357,23 +367,35 @@ jobs:
             }
           }
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-          try { $currentSid = [string]$identity.User.Value } finally { $identity.Dispose() }
+          try {
+            $currentSid = [string]$identity.User.Value
+            $currentGroups = @($identity.Groups | ForEach-Object { [string]$_.Value })
+          } finally { $identity.Dispose() }
           $boundarySids = @(
             $env:RETAILLENS_RELEASE_BUILD_SID,
             $currentSid,
+            $env:RETAILLENS_RELEASE_VERIFIER_SID,
             $env:RETAILLENS_RELEASE_PUBLISHER_SID
           ) | Sort-Object -Unique
           if (
             $currentSid -cne $env:RETAILLENS_RELEASE_SIGNING_SID -or
             $env:RETAILLENS_RELEASE_BUILD_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
+            $env:RETAILLENS_RELEASE_VERIFIER_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
             $env:RETAILLENS_RELEASE_PUBLISHER_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
-            @($boundarySids).Count -ne 3
-          ) { throw 'Build, signing, and publisher identities are not three exact distinct runner SIDs.' }
+            @($boundarySids).Count -ne 4
+          ) { throw 'Build, signing, signed-verifier, and publisher identities are not four exact distinct runner SIDs.' }
+          if ($currentSid -in @('S-1-5-18', 'S-1-5-32-544') -or 'S-1-5-32-544' -in $currentGroups) {
+            throw 'The signing runner account must not be SYSTEM or a member of local Administrators; privileged CKA operations belong only to the broker.'
+          }
           if (
             $env:SOURCE_COMMIT -notmatch '^[0-9a-f]{40}$' -or
             $env:EXPECTED_UNSIGNED_TREE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:EXPECTED_UNSIGNED_HANDOFF_TREE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
             $env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$' -or
             $env:RETAILLENS_TRUSTED_SIGNING_HARNESS_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:RETAILLENS_SIGNING_BROKER_POLICY_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:RETAILLENS_HANDOFF_BROKER_POLICY_SHA256 -notmatch '^[0-9a-f]{64}$' -or
             $env:RETAILLENS_ESIGNER_CKA_INSTALLER_SHA256 -notmatch '^[0-9a-f]{64}$' -or
             $env:RETAILLENS_ESIGNER_CKA_UNINSTALLER_SHA256 -notmatch '^[0-9a-f]{64}$' -or
             $env:RETAILLENS_WINDOWS_SIGNER_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$' -or
@@ -390,6 +412,15 @@ jobs:
             $harness.StartsWith($runnerTemp, [StringComparison]::OrdinalIgnoreCase) -or
             (Get-FileHash -LiteralPath $harness -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RETAILLENS_TRUSTED_SIGNING_HARNESS_SHA256
           ) { throw 'Pre-provisioned out-of-repository signing harness is absent, linked, misplaced, or hash-mismatched.' }
+          $handoffBroker = (Resolve-Path -LiteralPath $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH).Path
+          $handoffBrokerItem = Get-Item -LiteralPath $handoffBroker -Force
+          if (
+            $handoffBrokerItem.PSIsContainer -or
+            ($handoffBrokerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $handoffBroker.StartsWith($workspace, [StringComparison]::OrdinalIgnoreCase) -or
+            $handoffBroker.StartsWith($runnerTemp, [StringComparison]::OrdinalIgnoreCase) -or
+            (Get-FileHash -LiteralPath $handoffBroker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256
+          ) { throw 'Pinned out-of-repository SYSTEM handoff broker client is absent, linked, misplaced, or hash-mismatched.' }
 
           function Test-PathInside([string]$Child, [string]$Parent) {
             $exactChild = [IO.Path]::GetFullPath($Child).TrimEnd('\')
@@ -398,7 +429,7 @@ jobs:
               $exactChild.StartsWith($exactParent + '\', [StringComparison]::OrdinalIgnoreCase)
           }
           function Assert-ExactBoundaryAcl {
-            param([string]$Path, [string[]]$AllowedSids, [string]$Label, [switch]$RequireProtected)
+            param([string]$Path, [string[]]$AllowedSids, [string]$OwnerSid, [string]$Label, [switch]$RequireProtected)
             $acl = Get-Acl -LiteralPath $Path
             $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
             $actual = @($rules | ForEach-Object { [string]$_.IdentityReference.Value } | Sort-Object -Unique)
@@ -407,7 +438,7 @@ jobs:
               ($RequireProtected -and -not $acl.AreAccessRulesProtected) -or
               ($actual -join '|') -cne ($expected -join '|') -or
               @($rules | Where-Object { $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow }).Count -ne 0 -or
-              $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cnotin $expected
+              $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $OwnerSid
             ) { throw "$Label ACL is not the exact protected allowlist." }
             foreach ($sid in $expected) {
               if (@($rules | Where-Object {
@@ -416,6 +447,24 @@ jobs:
                   [Security.AccessControl.FileSystemRights]::FullControl)
               }).Count -eq 0) { throw "$Label lacks FullControl for an approved identity." }
             }
+          }
+          function Get-HandoffTreeSha256([string]$TreeRoot) {
+            $exactRoot = (Resolve-Path -LiteralPath $TreeRoot).Path
+            $treeItems = @(Get-Item -LiteralPath $exactRoot -Force; Get-ChildItem -LiteralPath $exactRoot -Recurse -Force)
+            if (@($treeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+              throw 'Private handoff tree contains a reparse point.'
+            }
+            $rows = @(
+              foreach ($file in $treeItems | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName) {
+                $relative = [IO.Path]::GetRelativePath($exactRoot, $file.FullName).Replace('\', '/')
+                "$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) $($file.Length) $relative"
+              }
+            )
+            if ($rows.Count -lt 2) { throw 'Private handoff tree is unexpectedly small.' }
+            $canonical = (($rows -join "`n") + "`n")
+            return [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))
+            ).ToLowerInvariant()
           }
 
           $root = [IO.Path]::GetFullPath($env:RETAILLENS_RELEASE_HANDOFF_ROOT).TrimEnd('\')
@@ -442,32 +491,38 @@ jobs:
             $ancestor = $ancestor.Parent
           }
           $rootSids = @(
-            $env:RETAILLENS_RELEASE_BUILD_SID, $currentSid,
-            $env:RETAILLENS_RELEASE_PUBLISHER_SID, 'S-1-5-18', 'S-1-5-32-544'
+            $currentSid, 'S-1-5-18', 'S-1-5-32-544'
           ) | Sort-Object -Unique
-          Assert-ExactBoundaryAcl -Path $root -AllowedSids $rootSids -Label 'Private release handoff root' -RequireProtected
+          Assert-ExactBoundaryAcl -Path $root -AllowedSids $rootSids -OwnerSid 'S-1-5-18' -Label 'Private release handoff root' -RequireProtected
+          $rootChildren = @(Get-ChildItem -LiteralPath $root -Force)
+          if ($rootChildren.Count -ne 1 -or $rootChildren[0].Name -cne $env:UNSIGNED_HANDOFF_ID) {
+            throw 'Signer received a non-exclusive private root or an unexpected handoff object.'
+          }
           $source = [IO.Path]::GetFullPath((Join-Path $root $env:UNSIGNED_HANDOFF_ID))
           if ([IO.Directory]::GetParent($source).FullName.TrimEnd('\') -cne $root) { throw 'Unsigned handoff escaped the private root.' }
           $sourceItems = @(Get-Item -LiteralPath $source -Force; Get-ChildItem -LiteralPath $source -Recurse -Force)
           if (@($sourceItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
             throw 'Unsigned private handoff contains a reparse point.'
           }
-          $inputSids = @($env:RETAILLENS_RELEASE_BUILD_SID, $currentSid, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object -Unique
-          Assert-ExactBoundaryAcl -Path $source -AllowedSids $inputSids -Label 'Unsigned private handoff root' -RequireProtected
+          $inputSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object -Unique
+          Assert-ExactBoundaryAcl -Path $source -AllowedSids $inputSids -OwnerSid 'S-1-5-18' -Label 'Unsigned private handoff root' -RequireProtected
           foreach ($sourceItem in $sourceItems | Select-Object -Skip 1) {
-            Assert-ExactBoundaryAcl -Path $sourceItem.FullName -AllowedSids $inputSids -Label 'Unsigned private handoff child'
+            Assert-ExactBoundaryAcl -Path $sourceItem.FullName -AllowedSids $inputSids -OwnerSid 'S-1-5-18' -Label 'Unsigned private handoff child' -RequireProtected
           }
-          $record = Get-Content -LiteralPath (Join-Path $source 'unsigned-handoff.v1.json') -Raw | ConvertFrom-Json
+          if ((Get-HandoffTreeSha256 -TreeRoot $source) -cne $env:EXPECTED_UNSIGNED_HANDOFF_TREE_SHA256) {
+            throw 'Build-to-signer handoff tree changed before signer ownership acceptance.'
+          }
+          $record = Get-Content -LiteralPath (Join-Path $source 'unsigned-handoff.v2.json') -Raw | ConvertFrom-Json
           $recordKeys = @($record.PSObject.Properties.Name | Sort-Object)
           $expectedRecordKeys = @(
             'architecture', 'author', 'buildSid', 'fileCount', 'files', 'githubArtifactTransfer',
             'handoffKind', 'machineName', 'product', 'publisherSid', 'releaseTag', 'repository',
             'repositoryId', 'schemaVersion', 'signingSid', 'sourceCommit', 'unsignedPayloadTreeSha256',
-            'version', 'workflowRunAttempt', 'workflowRunId'
+            'verifierSid', 'version', 'workflowRunAttempt', 'workflowRunId'
           ) | Sort-Object
           if (
             ($recordKeys -join '|') -cne ($expectedRecordKeys -join '|') -or
-            [int]$record.schemaVersion -ne 1 -or
+            [int]$record.schemaVersion -ne 2 -or
             [string]$record.handoffKind -cne 'private-unsigned-windows-release' -or
             [string]$record.repository -cne 'lzy2767865503-pixel/RetailLens-System' -or
             [long]$record.repositoryId -ne 1313443623 -or
@@ -477,6 +532,7 @@ jobs:
             [string]$record.machineName -cne [string]$env:COMPUTERNAME -or
             [string]$record.buildSid -cne $env:RETAILLENS_RELEASE_BUILD_SID -or
             [string]$record.signingSid -cne $currentSid -or
+            [string]$record.verifierSid -cne $env:RETAILLENS_RELEASE_VERIFIER_SID -or
             [string]$record.publisherSid -cne $env:RETAILLENS_RELEASE_PUBLISHER_SID -or
             [string]$record.workflowRunId -cne '${{ github.run_id }}' -or
             [int]$record.workflowRunAttempt -ne [int]'${{ github.run_attempt }}' -or
@@ -502,7 +558,7 @@ jobs:
           if ($physicalFiles.Count -ne ([int]$record.fileCount + 1)) { throw 'Unsigned private handoff contains an unrecorded or missing file.' }
           foreach ($physicalFile in $physicalFiles) {
             $relative = [IO.Path]::GetRelativePath($source, $physicalFile.FullName).Replace('\', '/')
-            if ($relative -cne 'unsigned-handoff.v1.json' -and -not $expectedPaths.Contains($relative)) {
+            if ($relative -cne 'unsigned-handoff.v2.json' -and -not $expectedPaths.Contains($relative)) {
               throw "Unsigned private handoff contains an unrecorded file: $relative"
             }
           }
@@ -510,10 +566,11 @@ jobs:
           if (Test-Path -LiteralPath $workRoot) { throw 'Run-owned isolated signing root already exists.' }
           New-Item -ItemType Directory -Path $workRoot | Out-Null
           "RETAILLENS_PINNED_SIGNING_HARNESS=$harness" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETAILLENS_PINNED_HANDOFF_BROKER=$handoffBroker" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RETAILLENS_UNSIGNED_HANDOFF_PATH=$source" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RETAILLENS_ISOLATED_SIGNING_ROOT=$workRoot" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Invoke only the pinned out-of-repository harness with machine-bound credentials
+      - name: Invoke pinned sign-only harness with a broker policy that denies arbitrary same-account calls
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -531,8 +588,13 @@ jobs:
             --cka-archive-sha256 $env:RETAILLENS_ESIGNER_CKA_ARCHIVE_SHA256 `
             --cka-installer-sha256 $env:RETAILLENS_ESIGNER_CKA_INSTALLER_SHA256 `
             --cka-uninstaller-sha256 $env:RETAILLENS_ESIGNER_CKA_UNINSTALLER_SHA256 `
-            --lifecycle-rounds 2 `
-            --credential-source machine-bound-broker
+            --candidate-execution-policy forbidden `
+            --credential-source machine-bound-broker `
+            --broker-policy-sha256 $env:RETAILLENS_SIGNING_BROKER_POLICY_SHA256 `
+            --broker-caller-policy exact-sid-harness-hash-command-run-input-one-shot `
+            --broker-workflow-run-id '${{ github.run_id }}' `
+            --broker-workflow-run-attempt '${{ github.run_attempt }}' `
+            --broker-one-shot
           if ($LASTEXITCODE -ne 0) { throw 'Pinned isolated signing harness failed.' }
 
       - name: Always unload CKA, DeleteKey, uninstall exact bytes, remove provider state, and independently recheck residue
@@ -588,13 +650,17 @@ jobs:
           if (($expectedSumLines -join '|') -cne ($actualSumLines -join '|')) { throw 'Signed SHA256SUMS.txt is not exact.' }
 
           $evidencePath = Join-Path $output $evidenceName
+          $signingEvidenceSha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
           $evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
           $evidenceKeys = @($evidence.PSObject.Properties.Name | Sort-Object)
           $expectedEvidenceKeys = @(
             'allPortableExecutablesSigned', 'appDataRemoved', 'certificateRepresentationsRemoved',
+            'brokerArbitrarySameAccountInvocationDenied', 'brokerCallerHarnessSha256', 'brokerCallerPolicy',
+            'brokerCallerSid', 'brokerInputTreeSha256', 'brokerOneShotCapabilityConsumed', 'brokerPolicySha256',
+            'brokerWorkflowRunAttempt', 'brokerWorkflowRunId', 'candidateExecutionCount', 'candidateExecutionForbidden',
             'ckaArchiveSha256', 'ckaInstallerSha256', 'ckaProcessesStopped', 'ckaStateSchemaVersion',
             'ckaUninstallerSha256', 'cleanupCompleted', 'cleanupRecheckCompleted', 'deleteKeyVerified',
-            'inputPayloadTreeSha256', 'installRootRemoved', 'lifecycleCandidateSha256', 'lifecycleRounds',
+            'inputPayloadTreeSha256', 'installRootRemoved',
             'longLivedCredentialsInEnvironment', 'longLivedTotpSeedOnCommandLine', 'machineBoundCredentialBroker',
             'masterKeyRemoved', 'outputArchiveSha256', 'privateKeyContainersRemoved', 'provider',
             'providerBaselineRestored', 'registryBaselineRestored', 'repositoryId', 'rfc3161TimestampVerified',
@@ -609,8 +675,8 @@ jobs:
             [string]$evidence.sourceCommit -cne $env:SOURCE_COMMIT -or
             [string]$evidence.inputPayloadTreeSha256 -cne $env:EXPECTED_UNSIGNED_TREE_SHA256 -or
             [string]$evidence.outputArchiveSha256 -cne $archiveSha256 -or
-            [string]$evidence.lifecycleCandidateSha256 -cne $archiveSha256 -or
-            [int]$evidence.lifecycleRounds -ne 2 -or
+            $evidence.candidateExecutionForbidden -ne $true -or
+            [int]$evidence.candidateExecutionCount -ne 0 -or
             [string]$evidence.signerSubject -cne $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT -or
             [string]$evidence.signerThumbprint -ine $env:RETAILLENS_WINDOWS_SIGNER_THUMBPRINT -or
             [string]$evidence.signerSimpleName -notin @('LAI ZEYU', '来泽宇') -or
@@ -623,6 +689,15 @@ jobs:
             $evidence.rfc3161TimestampVerified -ne $true -or
             $evidence.timestampAuthorityEkuVerified -ne $true -or
             $evidence.machineBoundCredentialBroker -ne $true -or
+            [string]$evidence.brokerCallerSid -cne $env:RETAILLENS_RELEASE_SIGNING_SID -or
+            [string]$evidence.brokerCallerHarnessSha256 -cne $env:RETAILLENS_TRUSTED_SIGNING_HARNESS_SHA256 -or
+            [string]$evidence.brokerPolicySha256 -cne $env:RETAILLENS_SIGNING_BROKER_POLICY_SHA256 -or
+            [string]$evidence.brokerCallerPolicy -cne 'exact-sid-harness-hash-command-run-input-one-shot' -or
+            [string]$evidence.brokerWorkflowRunId -cne '${{ github.run_id }}' -or
+            [int]$evidence.brokerWorkflowRunAttempt -ne [int]'${{ github.run_attempt }}' -or
+            [string]$evidence.brokerInputTreeSha256 -cne $env:EXPECTED_UNSIGNED_TREE_SHA256 -or
+            $evidence.brokerOneShotCapabilityConsumed -ne $true -or
+            $evidence.brokerArbitrarySameAccountInvocationDenied -ne $true -or
             $evidence.longLivedCredentialsInEnvironment -ne $false -or
             $evidence.longLivedTotpSeedOnCommandLine -ne $false -or
             $evidence.cleanupCompleted -ne $true -or
@@ -669,17 +744,42 @@ jobs:
               ) { throw "Signed archive PE identity/timestamp is invalid: $($pe.Name)" }
             }
           } finally {
-            if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Recurse -Force }
+            if (Test-Path -LiteralPath $probe) {
+              $probeItems = @(Get-Item -LiteralPath $probe -Force; Get-ChildItem -LiteralPath $probe -Recurse -Force)
+              if (@($probeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+                throw 'Signing static probe contains a reparse point and cannot be recursively deleted.'
+              }
+              Remove-Item -LiteralPath $probe -Recurse -Force
+            }
+          }
+
+          function Get-HandoffTreeSha256([string]$TreeRoot) {
+            $exactRoot = (Resolve-Path -LiteralPath $TreeRoot).Path
+            $treeItems = @(Get-Item -LiteralPath $exactRoot -Force; Get-ChildItem -LiteralPath $exactRoot -Recurse -Force)
+            if (@($treeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+              throw 'Private signed handoff tree contains a reparse point.'
+            }
+            $rows = @(
+              foreach ($file in $treeItems | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName) {
+                $relative = [IO.Path]::GetRelativePath($exactRoot, $file.FullName).Replace('\', '/')
+                "$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) $($file.Length) $relative"
+              }
+            )
+            if ($rows.Count -lt 2) { throw 'Private signed handoff tree is unexpectedly small.' }
+            $canonical = (($rows -join "`n") + "`n")
+            return [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))
+            ).ToLowerInvariant()
           }
 
           $privateRoot = [IO.Path]::GetFullPath($env:RETAILLENS_RELEASE_HANDOFF_ROOT).TrimEnd('\')
-          $leaf = "retaillens-release-signed-${{ github.run_id }}-${{ github.run_attempt }}-$($env:SOURCE_COMMIT.Substring(0, 12)).ready"
+          $leaf = "retaillens-release-signed-unverified-${{ github.run_id }}-${{ github.run_attempt }}-$($env:SOURCE_COMMIT.Substring(0, 12)).ready"
           $final = Join-Path $privateRoot $leaf
           $incomplete = Join-Path $privateRoot ($leaf + '.incomplete')
           if ((Test-Path -LiteralPath $final) -or (Test-Path -LiteralPath $incomplete)) { throw 'Exact signed publication handoff already exists.' }
           $signingSid = $env:RETAILLENS_RELEASE_SIGNING_SID
-          $publisherSid = $env:RETAILLENS_RELEASE_PUBLISHER_SID
-          $allowedSids = @($signingSid, $publisherSid, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object -Unique
+          $verifierSid = $env:RETAILLENS_RELEASE_VERIFIER_SID
+          $allowedSids = @($signingSid, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object -Unique
           $moved = $false
           try {
             New-Item -ItemType Directory -Path $incomplete | Out-Null
@@ -708,8 +808,8 @@ jobs:
               }
             )
             $handoff = [ordered]@{
-              schemaVersion = 1
-              handoffKind = 'private-signed-windows-publication'
+              schemaVersion = 2
+              handoffKind = 'private-signed-windows-verification'
               repository = 'lzy2767865503-pixel/RetailLens-System'
               repositoryId = 1313443623
               sourceCommit = $env:SOURCE_COMMIT
@@ -718,18 +818,19 @@ jobs:
               workflowRunAttempt = [int]'${{ github.run_attempt }}'
               machineName = [string]$env:COMPUTERNAME
               signingSid = $signingSid
-              publisherSid = $publisherSid
+              verifierSid = $verifierSid
+              publisherSid = $env:RETAILLENS_RELEASE_PUBLISHER_SID
               unsignedPayloadTreeSha256 = $env:EXPECTED_UNSIGNED_TREE_SHA256
               archiveName = $archiveName
               archiveSha256 = $archiveSha256
               signerSubject = $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT
               signerThumbprint = $env:RETAILLENS_WINDOWS_SIGNER_THUMBPRINT.ToLowerInvariant()
               signingHarnessSha256 = $env:RETAILLENS_TRUSTED_SIGNING_HARNESS_SHA256
-              signingEvidenceSha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+              signingEvidenceSha256 = $signingEvidenceSha256
               files = $inventory
             }
             [IO.File]::WriteAllText(
-              (Join-Path $incomplete 'signed-handoff.v1.json'),
+              (Join-Path $incomplete 'signed-handoff.v2.json'),
               (($handoff | ConvertTo-Json -Depth 6 -Compress) + "`n"),
               [Text.UTF8Encoding]::new($false)
             )
@@ -752,7 +853,7 @@ jobs:
                 ($aclTarget.FullName -ceq $final -and -not $acl.AreAccessRulesProtected) -or
                 ($actualSids -join '|') -cne ($allowedSids -join '|') -or
                 @($rules | Where-Object { $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow }).Count -ne 0 -or
-                $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cnotin $allowedSids
+                $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $signingSid
               ) { throw 'Final signed private handoff ACL is not exact.' }
               foreach ($sid in $allowedSids) {
                 if (@($rules | Where-Object {
@@ -769,15 +870,54 @@ jobs:
           }
           $unsignedInput = [IO.Path]::GetFullPath($env:RETAILLENS_UNSIGNED_HANDOFF_PATH)
           if ([IO.Directory]::GetParent($unsignedInput).FullName.TrimEnd('\') -cne $privateRoot) { throw 'Unsigned input cleanup escaped private root.' }
+          $unsignedItems = @(Get-Item -LiteralPath $unsignedInput -Force; Get-ChildItem -LiteralPath $unsignedInput -Recurse -Force)
+          if (@($unsignedItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+            throw 'Unsigned input contains a reparse point and cannot be recursively removed.'
+          }
           Remove-Item -LiteralPath $unsignedInput -Recurse -Force
-          if (Test-Path -LiteralPath $unsignedInput) { throw 'Unsigned private handoff remained after signed handoff completion.' }
+          if (Test-Path -LiteralPath $unsignedInput) { throw 'Unsigned private handoff remained after sign-only handoff completion.' }
+          $signingWorkRoot = [IO.Path]::GetFullPath($env:RETAILLENS_ISOLATED_SIGNING_ROOT)
+          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+          if ([IO.Directory]::GetParent($signingWorkRoot).FullName.TrimEnd('\') -cne $runnerTemp -or
+              (Split-Path -Leaf $signingWorkRoot) -notlike 'retaillens-isolated-signing-*') {
+            throw 'Pre-transfer signing work-root cleanup escaped RUNNER_TEMP.'
+          }
+          $signingWorkItems = @(Get-Item -LiteralPath $signingWorkRoot -Force; Get-ChildItem -LiteralPath $signingWorkRoot -Recurse -Force)
+          if (@($signingWorkItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+            throw 'Pre-transfer signing work root contains a reparse point and cannot be recursively removed.'
+          }
+          Remove-Item -LiteralPath $signingWorkRoot -Recurse -Force
+          if (Test-Path -LiteralPath $signingWorkRoot) { throw 'Signing work root remained before signer access revocation.' }
+          $handoffTreeSha256 = Get-HandoffTreeSha256 -TreeRoot $final
+          & $env:RETAILLENS_PINNED_HANDOFF_BROKER `
+            transition-retaillens-release-handoff `
+            --private-root $privateRoot `
+            --handoff-id $leaf `
+            --from-sid $signingSid `
+            --to-sid $verifierSid `
+            --target-access full-control `
+            --expected-tree-sha256 $handoffTreeSha256 `
+            --source-commit $env:SOURCE_COMMIT `
+            --workflow-run-id '${{ github.run_id }}' `
+            --workflow-run-attempt '${{ github.run_attempt }}' `
+            --caller-client-sha256 $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256 `
+            --policy-sha256 $env:RETAILLENS_HANDOFF_BROKER_POLICY_SHA256 `
+            --owner-sid S-1-5-18 `
+            --require-root-single-child `
+            --quarantine-before-grant `
+            --require-zero-source-open-handles `
+            --reverify-tree-after-revoke `
+            --remove-source-access |
+            Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned SYSTEM handoff broker rejected the signer-to-verifier transfer.' }
           "signed_handoff_id=$leaf" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "archive_name=$archiveName" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "archive_sha256=$archiveSha256" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "signer_thumbprint=$($env:RETAILLENS_WINDOWS_SIGNER_THUMBPRINT.ToLowerInvariant())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "signing_evidence_sha256=$((Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "signing_evidence_sha256=$signingEvidenceSha256" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "handoff_tree_sha256=$handoffTreeSha256" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Remove isolated signing work root after residue evidence and private signed handoff
+      - name: Remove isolated signing work root after residue evidence and sign-only handoff
         if: always()
         shell: pwsh
         run: |
@@ -795,12 +935,584 @@ jobs:
             if (Test-Path -LiteralPath $root) { throw 'Isolated signing work root remained.' }
           }
 
-  publish_verified_release:
-    name: No-checkout exact-ID REST publisher with immutable ownership and fail-closed ambiguity
+  verify_signed_candidate:
+    name: Fresh no-checkout no-signing verifier runs two signed lifecycle rounds
     needs: [build_private_unsigned_candidate, sign_private_candidate]
     if: >-
       needs.build_private_unsigned_candidate.result == 'success' &&
       needs.sign_private_candidate.result == 'success' &&
+      github.repository == 'lzy2767865503-pixel/RetailLens-System' &&
+      github.repository_id == '1313443623' &&
+      github.repository_owner == 'lzy2767865503-pixel' &&
+      github.actor == 'lzy2767865503-pixel' &&
+      github.triggering_actor == 'lzy2767865503-pixel' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true
+    runs-on:
+      group: retaillens-trusted-windows-verifier
+      labels: [self-hosted, Windows, X64, retaillens-release-verifier, ephemeral, no-checkout]
+    timeout-minutes: 90
+    environment: github-release
+    permissions: {}
+    outputs:
+      verified_handoff_id: ${{ steps.verified_handoff.outputs.verified_handoff_id }}
+      archive_name: ${{ steps.verified_handoff.outputs.archive_name }}
+      archive_sha256: ${{ steps.verified_handoff.outputs.archive_sha256 }}
+      signer_thumbprint: ${{ steps.verified_handoff.outputs.signer_thumbprint }}
+      signing_evidence_sha256: ${{ steps.verified_handoff.outputs.signing_evidence_sha256 }}
+      verification_evidence_sha256: ${{ steps.verified_handoff.outputs.verification_evidence_sha256 }}
+      verified_handoff_tree_sha256: ${{ steps.verified_handoff.outputs.handoff_tree_sha256 }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      SOURCE_COMMIT: ${{ needs.build_private_unsigned_candidate.outputs.commit_sha }}
+      SIGNED_HANDOFF_ID: ${{ needs.sign_private_candidate.outputs.signed_handoff_id }}
+      EXPECTED_ARCHIVE_NAME: ${{ needs.sign_private_candidate.outputs.archive_name }}
+      EXPECTED_ARCHIVE_SHA256: ${{ needs.sign_private_candidate.outputs.archive_sha256 }}
+      EXPECTED_SIGNER_THUMBPRINT: ${{ needs.sign_private_candidate.outputs.signer_thumbprint }}
+      EXPECTED_SIGNING_EVIDENCE_SHA256: ${{ needs.sign_private_candidate.outputs.signing_evidence_sha256 }}
+      EXPECTED_SIGNED_HANDOFF_TREE_SHA256: ${{ needs.sign_private_candidate.outputs.signed_handoff_tree_sha256 }}
+      RETAILLENS_RELEASE_HANDOFF_ROOT: ${{ vars.RETAILLENS_RELEASE_HANDOFF_ROOT }}
+      RETAILLENS_RELEASE_BUILD_SID: ${{ vars.RETAILLENS_RELEASE_BUILD_SID }}
+      RETAILLENS_RELEASE_SIGNING_SID: ${{ vars.RETAILLENS_RELEASE_SIGNING_SID }}
+      RETAILLENS_RELEASE_VERIFIER_SID: ${{ vars.RETAILLENS_RELEASE_VERIFIER_SID }}
+      RETAILLENS_RELEASE_PUBLISHER_SID: ${{ vars.RETAILLENS_RELEASE_PUBLISHER_SID }}
+      RETAILLENS_TRUSTED_VERIFIER_HARNESS_PATH: ${{ vars.RETAILLENS_TRUSTED_VERIFIER_HARNESS_PATH }}
+      RETAILLENS_TRUSTED_VERIFIER_HARNESS_SHA256: ${{ vars.RETAILLENS_TRUSTED_VERIFIER_HARNESS_SHA256 }}
+      RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH: ${{ vars.RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH }}
+      RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256: ${{ vars.RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256 }}
+      RETAILLENS_HANDOFF_BROKER_POLICY_SHA256: ${{ vars.RETAILLENS_HANDOFF_BROKER_POLICY_SHA256 }}
+      RETAILLENS_WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_SIGNER_SUBJECT }}
+
+    steps:
+      - name: Validate fresh verifier identity, signed immutable input, and absent signing capability
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          foreach ($forbidden in @(
+            'ESIGNER_CKA_USERNAME', 'ESIGNER_CKA_PASSWORD', 'ESIGNER_CKA_TOTP_SECRET',
+            'SSL_ESIGNER_USERNAME', 'SSL_ESIGNER_PASSWORD', 'SSL_ESIGNER_TOTP_SECRET',
+            'WINDOWS_SIGNING_CERTIFICATE_BASE64', 'WIN_CSC_LINK',
+            'RETAILLENS_TRUSTED_SIGNING_HARNESS_PATH', 'RETAILLENS_SIGNING_BROKER_POLICY_SHA256'
+          )) {
+            if (-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($forbidden))) {
+              throw "$forbidden must never enter the signed-verifier process."
+            }
+          }
+          if (Test-Path -LiteralPath $env:GITHUB_WORKSPACE) {
+            if (@(Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Force -ErrorAction Stop).Count -ne 0) {
+              throw 'No-checkout signed-verifier workspace is not empty; runner is not fresh.'
+            }
+          }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          try {
+            $currentSid = [string]$identity.User.Value
+            $currentGroups = @($identity.Groups | ForEach-Object { [string]$_.Value })
+          } finally { $identity.Dispose() }
+          $boundarySids = @(
+            $env:RETAILLENS_RELEASE_BUILD_SID, $env:RETAILLENS_RELEASE_SIGNING_SID,
+            $currentSid, $env:RETAILLENS_RELEASE_PUBLISHER_SID
+          ) | Sort-Object -Unique
+          if (
+            $currentSid -cne $env:RETAILLENS_RELEASE_VERIFIER_SID -or
+            $env:RETAILLENS_RELEASE_BUILD_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
+            $env:RETAILLENS_RELEASE_SIGNING_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
+            $env:RETAILLENS_RELEASE_PUBLISHER_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
+            @($boundarySids).Count -ne 4 -or
+            $env:SOURCE_COMMIT -notmatch '^[0-9a-f]{40}$' -or
+            $env:EXPECTED_ARCHIVE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:EXPECTED_SIGNER_THUMBPRINT -notmatch '^[0-9a-f]{40}$' -or
+            $env:EXPECTED_SIGNING_EVIDENCE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:EXPECTED_SIGNED_HANDOFF_TREE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:RETAILLENS_TRUSTED_VERIFIER_HARNESS_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:RETAILLENS_HANDOFF_BROKER_POLICY_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]::IsNullOrWhiteSpace($env:RETAILLENS_WINDOWS_SIGNER_SUBJECT)
+          ) { throw 'Signed-verifier identity or immutable inputs are absent, malformed, or not isolated.' }
+          if ($currentSid -in @('S-1-5-18', 'S-1-5-32-544') -or 'S-1-5-32-544' -in $currentGroups) {
+            throw 'The signed-verifier runner account must not be SYSTEM or a member of local Administrators.'
+          }
+
+          $harness = (Resolve-Path -LiteralPath $env:RETAILLENS_TRUSTED_VERIFIER_HARNESS_PATH).Path
+          $harnessItem = Get-Item -LiteralPath $harness -Force
+          $workspacePrefix = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\') + '\'
+          $runnerTempPrefix = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
+          if (
+            $harnessItem.PSIsContainer -or
+            ($harnessItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $harness.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            $harness.StartsWith($runnerTempPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            (Get-FileHash -LiteralPath $harness -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RETAILLENS_TRUSTED_VERIFIER_HARNESS_SHA256
+          ) { throw 'Pinned out-of-repository signed-verifier harness is absent, linked, misplaced, or hash-mismatched.' }
+          $handoffBroker = (Resolve-Path -LiteralPath $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_PATH).Path
+          $handoffBrokerItem = Get-Item -LiteralPath $handoffBroker -Force
+          if (
+            $handoffBrokerItem.PSIsContainer -or
+            ($handoffBrokerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $handoffBroker.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            $handoffBroker.StartsWith($runnerTempPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            (Get-FileHash -LiteralPath $handoffBroker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256
+          ) { throw 'Pinned out-of-repository SYSTEM handoff broker client is absent, linked, misplaced, or hash-mismatched.' }
+
+          function Test-PathInside([string]$Child, [string]$Parent) {
+            $exactChild = [IO.Path]::GetFullPath($Child).TrimEnd('\')
+            $exactParent = [IO.Path]::GetFullPath($Parent).TrimEnd('\')
+            return $exactChild.Equals($exactParent, [StringComparison]::OrdinalIgnoreCase) -or
+              $exactChild.StartsWith($exactParent + '\', [StringComparison]::OrdinalIgnoreCase)
+          }
+          function Assert-ExactBoundaryAcl {
+            param([string]$Path, [string[]]$AllowedSids, [string]$OwnerSid, [string]$Label, [switch]$RequireProtected)
+            $acl = Get-Acl -LiteralPath $Path
+            $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+            $actual = @($rules | ForEach-Object { [string]$_.IdentityReference.Value } | Sort-Object -Unique)
+            $expected = @($AllowedSids | Sort-Object -Unique)
+            if (
+              ($RequireProtected -and -not $acl.AreAccessRulesProtected) -or
+              ($actual -join '|') -cne ($expected -join '|') -or
+              @($rules | Where-Object { $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow }).Count -ne 0 -or
+              $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $OwnerSid
+            ) { throw "$Label ACL is not the exact protected allowlist." }
+            foreach ($sid in $expected) {
+              if (@($rules | Where-Object {
+                [string]$_.IdentityReference.Value -ceq $sid -and
+                (($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq
+                  [Security.AccessControl.FileSystemRights]::FullControl)
+              }).Count -eq 0) { throw "$Label lacks FullControl for an approved identity." }
+            }
+          }
+          function Get-HandoffTreeSha256([string]$TreeRoot) {
+            $exactRoot = (Resolve-Path -LiteralPath $TreeRoot).Path
+            $treeItems = @(Get-Item -LiteralPath $exactRoot -Force; Get-ChildItem -LiteralPath $exactRoot -Recurse -Force)
+            if (@($treeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+              throw 'Private handoff tree contains a reparse point.'
+            }
+            $rows = @(
+              foreach ($file in $treeItems | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName) {
+                $relative = [IO.Path]::GetRelativePath($exactRoot, $file.FullName).Replace('\', '/')
+                "$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) $($file.Length) $relative"
+              }
+            )
+            if ($rows.Count -lt 2) { throw 'Private handoff tree is unexpectedly small.' }
+            $canonical = (($rows -join "`n") + "`n")
+            return [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))
+            ).ToLowerInvariant()
+          }
+
+          $root = [IO.Path]::GetFullPath($env:RETAILLENS_RELEASE_HANDOFF_ROOT).TrimEnd('\')
+          if (
+            -not [IO.Path]::IsPathFullyQualified($root) -or $root.StartsWith('\\') -or
+            [IO.Path]::GetFileName($root) -cne 'RetailLensReleaseHandoff' -or
+            -not (Test-Path -LiteralPath $root -PathType Container)
+          ) { throw 'Signed-verifier handoff root is not the exact pre-provisioned local boundary.' }
+          $volumeRoot = [IO.Path]::GetPathRoot($root)
+          $drive = [IO.DriveInfo]::new($volumeRoot)
+          if (-not $drive.IsReady -or $drive.DriveType -ne [IO.DriveType]::Fixed -or $drive.DriveFormat -cne 'NTFS') {
+            throw 'Signed-verifier handoff root is not on a ready local fixed NTFS volume.'
+          }
+          foreach ($forbiddenPath in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)) {
+            if ($forbiddenPath -and ((Test-PathInside $root $forbiddenPath) -or (Test-PathInside $forbiddenPath $root))) {
+              throw 'Signed-verifier handoff root overlaps a workspace, temporary, or OneDrive root.'
+            }
+          }
+          $ancestor = Get-Item -LiteralPath $root -Force
+          while ($ancestor) {
+            if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Signed-verifier handoff root or ancestor is a reparse point.' }
+            if ($ancestor.FullName.TrimEnd('\').Equals($volumeRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { break }
+            $ancestor = $ancestor.Parent
+          }
+          $rootSids = @(
+            $currentSid, 'S-1-5-18', 'S-1-5-32-544'
+          ) | Sort-Object -Unique
+          Assert-ExactBoundaryAcl -Path $root -AllowedSids $rootSids -OwnerSid 'S-1-5-18' -Label 'Signed-verifier handoff root' -RequireProtected
+          $rootChildren = @(Get-ChildItem -LiteralPath $root -Force)
+          if ($rootChildren.Count -ne 1 -or $rootChildren[0].Name -cne $env:SIGNED_HANDOFF_ID) {
+            throw 'Signed verifier received a non-exclusive private root or an unexpected handoff object.'
+          }
+          $inputRoot = [IO.Path]::GetFullPath((Join-Path $root $env:SIGNED_HANDOFF_ID))
+          if ([IO.Directory]::GetParent($inputRoot).FullName.TrimEnd('\') -cne $root) { throw 'Signed-verifier input escaped the private root.' }
+          $items = @(Get-Item -LiteralPath $inputRoot -Force; Get-ChildItem -LiteralPath $inputRoot -Force)
+          if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0 -or
+              @($items | Select-Object -Skip 1 | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+            throw 'Signed-verifier input contains a directory or reparse point.'
+          }
+          $inputSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object -Unique
+          foreach ($item in $items) {
+            Assert-ExactBoundaryAcl -Path $item.FullName -AllowedSids $inputSids -OwnerSid 'S-1-5-18' -Label 'Signed-verifier immutable input' -RequireProtected
+          }
+          if ((Get-HandoffTreeSha256 -TreeRoot $inputRoot) -cne $env:EXPECTED_SIGNED_HANDOFF_TREE_SHA256) {
+            throw 'Signer-to-verifier handoff tree changed before verifier ownership acceptance.'
+          }
+
+          $recordPath = Join-Path $inputRoot 'signed-handoff.v2.json'
+          $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+          $recordKeys = @($record.PSObject.Properties.Name | Sort-Object)
+          $expectedRecordKeys = @(
+            'archiveName', 'archiveSha256', 'files', 'handoffKind', 'machineName', 'publisherSid',
+            'releaseTag', 'repository', 'repositoryId', 'schemaVersion', 'signerSubject',
+            'signerThumbprint', 'signingEvidenceSha256', 'signingHarnessSha256', 'signingSid',
+            'sourceCommit', 'unsignedPayloadTreeSha256', 'verifierSid', 'workflowRunAttempt', 'workflowRunId'
+          ) | Sort-Object
+          if (
+            ($recordKeys -join '|') -cne ($expectedRecordKeys -join '|') -or
+            [int]$record.schemaVersion -ne 2 -or
+            [string]$record.handoffKind -cne 'private-signed-windows-verification' -or
+            [string]$record.repository -cne 'lzy2767865503-pixel/RetailLens-System' -or
+            [long]$record.repositoryId -ne 1313443623 -or
+            [string]$record.sourceCommit -cne $env:SOURCE_COMMIT -or
+            [string]$record.releaseTag -cne $env:RELEASE_TAG -or
+            [string]$record.workflowRunId -cne '${{ github.run_id }}' -or
+            [int]$record.workflowRunAttempt -ne [int]'${{ github.run_attempt }}' -or
+            [string]$record.machineName -cne [string]$env:COMPUTERNAME -or
+            [string]$record.signingSid -cne $env:RETAILLENS_RELEASE_SIGNING_SID -or
+            [string]$record.verifierSid -cne $currentSid -or
+            [string]$record.publisherSid -cne $env:RETAILLENS_RELEASE_PUBLISHER_SID -or
+            [string]$record.archiveName -cne $env:EXPECTED_ARCHIVE_NAME -or
+            [string]$record.archiveSha256 -cne $env:EXPECTED_ARCHIVE_SHA256 -or
+            [string]$record.signerSubject -cne $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT -or
+            [string]$record.signerThumbprint -cne $env:EXPECTED_SIGNER_THUMBPRINT -or
+            [string]$record.signingEvidenceSha256 -cne $env:EXPECTED_SIGNING_EVIDENCE_SHA256 -or
+            [string]$record.signingHarnessSha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$record.unsignedPayloadTreeSha256 -notmatch '^[0-9a-f]{64}$'
+          ) { throw 'Signed-verifier input identity/schema differs from this exact run.' }
+          $expectedPublicNames = @(
+            $env:EXPECTED_ARCHIVE_NAME, 'SHA256SUMS.txt', 'PE-SIGNING-INVENTORY.json',
+            'THIRD_PARTY_NOTICES.txt', "retaillens-$($env:RELEASE_TAG.Substring(1)).spdx.json", 'STAGING-INVENTORY.json'
+          ) | Sort-Object
+          $publicEntries = @($record.files | Where-Object { $_.publicAsset -eq $true })
+          $privateEntries = @($record.files | Where-Object { $_.publicAsset -eq $false })
+          if ($publicEntries.Count -ne 6 -or $privateEntries.Count -ne 1 -or
+              [string]$privateEntries[0].name -cne 'SIGNING-BOUNDARY-EVIDENCE.json' -or
+              (@($publicEntries.name | Sort-Object) -join '|') -cne ($expectedPublicNames -join '|')) {
+            throw 'Signed-verifier public/private inventory is not exact.'
+          }
+          $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+          foreach ($entry in @($record.files)) {
+            $entryKeys = @($entry.PSObject.Properties.Name | Sort-Object)
+            if (($entryKeys -join '|') -cne 'name|publicAsset|sha256|size' -or
+                [IO.Path]::GetFileName([string]$entry.name) -cne [string]$entry.name -or
+                -not $seen.Add([string]$entry.name) -or [string]$entry.sha256 -notmatch '^[0-9a-f]{64}$' -or
+                [long]$entry.size -le 0) { throw 'Signed-verifier inventory entry is malformed.' }
+            $file = Join-Path $inputRoot ([string]$entry.name)
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
+                (Get-Item -LiteralPath $file).Length -ne [long]$entry.size -or
+                (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$entry.sha256) {
+              throw "Signed-verifier input file differs: $($entry.name)"
+            }
+          }
+          if (@(Get-ChildItem -LiteralPath $inputRoot -File -Force).Count -ne 8 -or
+              (Get-FileHash -LiteralPath (Join-Path $inputRoot $env:EXPECTED_ARCHIVE_NAME) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_ARCHIVE_SHA256 -or
+              (Get-FileHash -LiteralPath (Join-Path $inputRoot 'SIGNING-BOUNDARY-EVIDENCE.json') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_SIGNING_EVIDENCE_SHA256) {
+            throw 'Signed-verifier physical input inventory or immutable hashes differ.'
+          }
+
+          $probe = Join-Path $env:RUNNER_TEMP "retaillens-verifier-static-probe-${{ github.run_id }}-${{ github.run_attempt }}"
+          try {
+            Expand-Archive -LiteralPath (Join-Path $inputRoot $env:EXPECTED_ARCHIVE_NAME) -DestinationPath $probe
+            $peFiles = @(
+              foreach ($file in Get-ChildItem -LiteralPath $probe -File -Recurse -Force) {
+                $stream = [IO.File]::OpenRead($file.FullName)
+                try {
+                  if ($stream.Length -ge 2 -and $stream.ReadByte() -eq 0x4D -and $stream.ReadByte() -eq 0x5A) { $file }
+                } finally { $stream.Dispose() }
+              }
+            )
+            if ($peFiles.Count -lt 5) { throw 'Signed-verifier archive contains too few real MZ/PE files.' }
+            foreach ($pe in $peFiles) {
+              $signature = Get-AuthenticodeSignature -LiteralPath $pe.FullName
+              if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or -not $signature.SignerCertificate) {
+                throw "Signed-verifier archive PE signature is missing or invalid: $($pe.Name)"
+              }
+              $simpleName = $signature.SignerCertificate.GetNameInfo(
+                [Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false
+              )
+              if (-not $signature.TimeStamperCertificate -or
+                  $signature.SignerCertificate.Thumbprint -ine $env:EXPECTED_SIGNER_THUMBPRINT -or
+                  $signature.SignerCertificate.Subject -cne $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT -or
+                  $simpleName -notin @('LAI ZEYU', '来泽宇') -or
+                  -not (@($signature.TimeStamperCertificate.EnhancedKeyUsageList) | Where-Object { $_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.8' })) {
+                throw "Signed-verifier archive PE identity/timestamp is invalid: $($pe.Name)"
+              }
+            }
+          } finally {
+            if (Test-Path -LiteralPath $probe) {
+              $probeItems = @(Get-Item -LiteralPath $probe -Force; Get-ChildItem -LiteralPath $probe -Recurse -Force)
+              if (@($probeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+                throw 'Signed-verifier static probe contains a reparse point and cannot be recursively deleted.'
+              }
+              Remove-Item -LiteralPath $probe -Recurse -Force
+            }
+          }
+          $workRoot = Join-Path $env:RUNNER_TEMP "retaillens-signed-verifier-${{ github.run_id }}-${{ github.run_attempt }}"
+          if (Test-Path -LiteralPath $workRoot) { throw 'Signed-verifier work root already exists.' }
+          New-Item -ItemType Directory -Path $workRoot | Out-Null
+          "RETAILLENS_PINNED_VERIFIER_HARNESS=$harness" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETAILLENS_PINNED_HANDOFF_BROKER=$handoffBroker" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETAILLENS_SIGNED_INPUT_ROOT=$inputRoot" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETAILLENS_SIGNED_VERIFIER_WORK_ROOT=$workRoot" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run identical signed archive twice only in the no-signing verifier domain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidencePath = Join-Path $env:RETAILLENS_SIGNED_VERIFIER_WORK_ROOT 'SIGNED-VERIFICATION-EVIDENCE.json'
+          & $env:RETAILLENS_PINNED_VERIFIER_HARNESS `
+            verify-retaillens-signed-release `
+            --input-handoff $env:RETAILLENS_SIGNED_INPUT_ROOT `
+            --archive-name $env:EXPECTED_ARCHIVE_NAME `
+            --expected-archive-sha256 $env:EXPECTED_ARCHIVE_SHA256 `
+            --expected-signing-evidence-sha256 $env:EXPECTED_SIGNING_EVIDENCE_SHA256 `
+            --expected-signer-thumbprint $env:EXPECTED_SIGNER_THUMBPRINT `
+            --source-commit $env:SOURCE_COMMIT `
+            --release-tag $env:RELEASE_TAG `
+            --output-evidence $evidencePath `
+            --lifecycle-rounds 2 `
+            --candidate-execution-domain signed-verifier-only `
+            --signing-capability forbidden `
+            --require-signing-broker-access denied `
+            --require-zero-signing-provider-state
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned no-signing signed-verifier harness failed.' }
+
+      - name: Verify two-round evidence and atomically stage publication-only handoff
+        id: verified_handoff
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $evidencePath = Join-Path $env:RETAILLENS_SIGNED_VERIFIER_WORK_ROOT 'SIGNED-VERIFICATION-EVIDENCE.json'
+          $verificationEvidenceSha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
+          $evidenceKeys = @($evidence.PSObject.Properties.Name | Sort-Object)
+          $expectedEvidenceKeys = @(
+            'archiveSha256', 'candidateProcessCleanupVerified', 'lifecycleRounds', 'machineName',
+            'noSigningCredentialEnvironment', 'noSigningProvider', 'releaseTag', 'repositoryId',
+            'round1ArchiveSha256', 'round1Passed', 'round2ArchiveSha256', 'round2Passed',
+            'schemaVersion', 'signingBrokerAccessDenied', 'signingEvidenceSha256', 'sourceCommit',
+            'verifierHarnessSha256', 'verifierSid', 'workflowRunAttempt', 'workflowRunId'
+          ) | Sort-Object
+          if (
+            ($evidenceKeys -join '|') -cne ($expectedEvidenceKeys -join '|') -or
+            [int]$evidence.schemaVersion -ne 1 -or [long]$evidence.repositoryId -ne 1313443623 -or
+            [string]$evidence.sourceCommit -cne $env:SOURCE_COMMIT -or
+            [string]$evidence.releaseTag -cne $env:RELEASE_TAG -or
+            [string]$evidence.workflowRunId -cne '${{ github.run_id }}' -or
+            [int]$evidence.workflowRunAttempt -ne [int]'${{ github.run_attempt }}' -or
+            [string]$evidence.machineName -cne [string]$env:COMPUTERNAME -or
+            [string]$evidence.verifierSid -cne $env:RETAILLENS_RELEASE_VERIFIER_SID -or
+            [string]$evidence.verifierHarnessSha256 -cne $env:RETAILLENS_TRUSTED_VERIFIER_HARNESS_SHA256 -or
+            [string]$evidence.archiveSha256 -cne $env:EXPECTED_ARCHIVE_SHA256 -or
+            [string]$evidence.round1ArchiveSha256 -cne $env:EXPECTED_ARCHIVE_SHA256 -or
+            [string]$evidence.round2ArchiveSha256 -cne $env:EXPECTED_ARCHIVE_SHA256 -or
+            [string]$evidence.signingEvidenceSha256 -cne $env:EXPECTED_SIGNING_EVIDENCE_SHA256 -or
+            [int]$evidence.lifecycleRounds -ne 2 -or $evidence.round1Passed -ne $true -or
+            $evidence.round2Passed -ne $true -or $evidence.candidateProcessCleanupVerified -ne $true -or
+            $evidence.noSigningCredentialEnvironment -ne $true -or $evidence.noSigningProvider -ne $true -or
+            $evidence.signingBrokerAccessDenied -ne $true
+          ) { throw 'Signed-verifier evidence is incomplete, mismatched, or admits signing capability.' }
+          if ((Get-FileHash -LiteralPath (Join-Path $env:RETAILLENS_SIGNED_INPUT_ROOT $env:EXPECTED_ARCHIVE_NAME) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_ARCHIVE_SHA256) {
+            throw 'Signed-verifier lifecycle changed the immutable archive bytes.'
+          }
+
+          function Get-HandoffTreeSha256([string]$TreeRoot) {
+            $exactRoot = (Resolve-Path -LiteralPath $TreeRoot).Path
+            $treeItems = @(Get-Item -LiteralPath $exactRoot -Force; Get-ChildItem -LiteralPath $exactRoot -Recurse -Force)
+            if (@($treeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+              throw 'Private verified handoff tree contains a reparse point.'
+            }
+            $rows = @(
+              foreach ($file in $treeItems | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName) {
+                $relative = [IO.Path]::GetRelativePath($exactRoot, $file.FullName).Replace('\', '/')
+                "$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) $($file.Length) $relative"
+              }
+            )
+            if ($rows.Count -lt 2) { throw 'Private verified handoff tree is unexpectedly small.' }
+            $canonical = (($rows -join "`n") + "`n")
+            return [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))
+            ).ToLowerInvariant()
+          }
+
+          $root = [IO.Path]::GetFullPath($env:RETAILLENS_RELEASE_HANDOFF_ROOT).TrimEnd('\')
+          $leaf = "retaillens-release-verified-${{ github.run_id }}-${{ github.run_attempt }}-$($env:SOURCE_COMMIT.Substring(0, 12)).ready"
+          $final = Join-Path $root $leaf
+          $incomplete = Join-Path $root ($leaf + '.incomplete')
+          if ((Test-Path -LiteralPath $final) -or (Test-Path -LiteralPath $incomplete)) { throw 'Exact verified publication handoff already exists.' }
+          $verifierSid = $env:RETAILLENS_RELEASE_VERIFIER_SID
+          $publisherSid = $env:RETAILLENS_RELEASE_PUBLISHER_SID
+          $allowedSids = @($verifierSid, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object -Unique
+          $publicNames = @(
+            $env:EXPECTED_ARCHIVE_NAME, 'SHA256SUMS.txt', 'PE-SIGNING-INVENTORY.json',
+            'THIRD_PARTY_NOTICES.txt', "retaillens-$($env:RELEASE_TAG.Substring(1)).spdx.json", 'STAGING-INVENTORY.json'
+          ) | Sort-Object
+          $moved = $false
+          try {
+            New-Item -ItemType Directory -Path $incomplete | Out-Null
+            $security = [Security.AccessControl.DirectorySecurity]::new()
+            $security.SetOwner([Security.Principal.SecurityIdentifier]::new($verifierSid))
+            $security.SetAccessRuleProtection($true, $false)
+            foreach ($sid in $allowedSids) {
+              [void]$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.SecurityIdentifier]::new($sid),
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow
+              ))
+            }
+            Set-Acl -LiteralPath $incomplete -AclObject $security
+            foreach ($name in @($publicNames + 'SIGNING-BOUNDARY-EVIDENCE.json')) {
+              Copy-Item -LiteralPath (Join-Path $env:RETAILLENS_SIGNED_INPUT_ROOT $name) -Destination $incomplete
+            }
+            Copy-Item -LiteralPath $evidencePath -Destination $incomplete
+            $inventory = @(
+              foreach ($file in Get-ChildItem -LiteralPath $incomplete -File -Force | Sort-Object Name) {
+                [ordered]@{
+                  name = $file.Name
+                  size = [long]$file.Length
+                  sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                  publicAsset = $file.Name -cin $publicNames
+                }
+              }
+            )
+            $signedRecord = Get-Content -LiteralPath (Join-Path $env:RETAILLENS_SIGNED_INPUT_ROOT 'signed-handoff.v2.json') -Raw | ConvertFrom-Json
+            $handoff = [ordered]@{
+              schemaVersion = 1
+              handoffKind = 'private-verified-windows-publication'
+              repository = 'lzy2767865503-pixel/RetailLens-System'
+              repositoryId = 1313443623
+              sourceCommit = $env:SOURCE_COMMIT
+              releaseTag = $env:RELEASE_TAG
+              workflowRunId = '${{ github.run_id }}'
+              workflowRunAttempt = [int]'${{ github.run_attempt }}'
+              machineName = [string]$env:COMPUTERNAME
+              signingSid = $env:RETAILLENS_RELEASE_SIGNING_SID
+              verifierSid = $verifierSid
+              publisherSid = $publisherSid
+              unsignedPayloadTreeSha256 = [string]$signedRecord.unsignedPayloadTreeSha256
+              archiveName = $env:EXPECTED_ARCHIVE_NAME
+              archiveSha256 = $env:EXPECTED_ARCHIVE_SHA256
+              signerSubject = [string]$signedRecord.signerSubject
+              signerThumbprint = $env:EXPECTED_SIGNER_THUMBPRINT
+              signingHarnessSha256 = [string]$signedRecord.signingHarnessSha256
+              signingEvidenceSha256 = $env:EXPECTED_SIGNING_EVIDENCE_SHA256
+              verifierHarnessSha256 = $env:RETAILLENS_TRUSTED_VERIFIER_HARNESS_SHA256
+              verificationEvidenceSha256 = $verificationEvidenceSha256
+              lifecycleRounds = 2
+              files = $inventory
+            }
+            [IO.File]::WriteAllText(
+              (Join-Path $incomplete 'verified-handoff.v1.json'),
+              (($handoff | ConvertTo-Json -Depth 6 -Compress) + "`n"),
+              [Text.UTF8Encoding]::new($false)
+            )
+            if (@(Get-ChildItem -LiteralPath $incomplete -Force | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }).Count -ne 0) {
+              throw 'Verified publication handoff contains a directory or reparse point.'
+            }
+            [IO.Directory]::Move($incomplete, $final)
+            $moved = $true
+            $finalItems = @(Get-Item -LiteralPath $final -Force; Get-ChildItem -LiteralPath $final -Force)
+            if ($finalItems.Count -ne 10 -or
+                @($finalItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0 -or
+                @($finalItems | Select-Object -Skip 1 | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+              throw 'Final verified publication handoff inventory is not exactly nine regular files.'
+            }
+            foreach ($aclTarget in $finalItems) {
+              $acl = Get-Acl -LiteralPath $aclTarget.FullName
+              $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+              $actualSids = @($rules | ForEach-Object { [string]$_.IdentityReference.Value } | Sort-Object -Unique)
+              if (($aclTarget.FullName -ceq $final -and -not $acl.AreAccessRulesProtected) -or
+                  ($actualSids -join '|') -cne ($allowedSids -join '|') -or
+                  @($rules | Where-Object { $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow }).Count -ne 0 -or
+                  $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $verifierSid) {
+                throw 'Final verified publication handoff ACL is not exact.'
+              }
+              foreach ($sid in $allowedSids) {
+                if (@($rules | Where-Object {
+                  [string]$_.IdentityReference.Value -ceq $sid -and
+                  (($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq
+                    [Security.AccessControl.FileSystemRights]::FullControl)
+                }).Count -eq 0) { throw 'Final verified handoff lacks FullControl for an approved identity.' }
+              }
+            }
+          } catch {
+            if ($moved -and (Test-Path -LiteralPath $final)) { Remove-Item -LiteralPath $final -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $incomplete) { Remove-Item -LiteralPath $incomplete -Recurse -Force -ErrorAction SilentlyContinue }
+            throw
+          }
+          $signedInput = [IO.Path]::GetFullPath($env:RETAILLENS_SIGNED_INPUT_ROOT)
+          if ([IO.Directory]::GetParent($signedInput).FullName.TrimEnd('\') -cne $root) { throw 'Signed input cleanup escaped the private root.' }
+          $signedItems = @(Get-Item -LiteralPath $signedInput -Force; Get-ChildItem -LiteralPath $signedInput -Recurse -Force)
+          if (@($signedItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+            throw 'Signed input contains a reparse point and cannot be recursively removed.'
+          }
+          Remove-Item -LiteralPath $signedInput -Recurse -Force
+          if (Test-Path -LiteralPath $signedInput) { throw 'Unverified signed handoff remained after verified handoff completion.' }
+          $verifierWorkRoot = [IO.Path]::GetFullPath($env:RETAILLENS_SIGNED_VERIFIER_WORK_ROOT)
+          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+          if ([IO.Directory]::GetParent($verifierWorkRoot).FullName.TrimEnd('\') -cne $runnerTemp -or
+              (Split-Path -Leaf $verifierWorkRoot) -notlike 'retaillens-signed-verifier-*') {
+            throw 'Pre-transfer signed-verifier work-root cleanup escaped RUNNER_TEMP.'
+          }
+          $verifierWorkItems = @(Get-Item -LiteralPath $verifierWorkRoot -Force; Get-ChildItem -LiteralPath $verifierWorkRoot -Recurse -Force)
+          if (@($verifierWorkItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+            throw 'Pre-transfer signed-verifier work root contains a reparse point and cannot be recursively removed.'
+          }
+          Remove-Item -LiteralPath $verifierWorkRoot -Recurse -Force
+          if (Test-Path -LiteralPath $verifierWorkRoot) { throw 'Signed-verifier work root remained before verifier access revocation.' }
+          $handoffTreeSha256 = Get-HandoffTreeSha256 -TreeRoot $final
+          & $env:RETAILLENS_PINNED_HANDOFF_BROKER `
+            transition-retaillens-release-handoff `
+            --private-root $root `
+            --handoff-id $leaf `
+            --from-sid $verifierSid `
+            --to-sid $publisherSid `
+            --target-access read-and-execute `
+            --expected-tree-sha256 $handoffTreeSha256 `
+            --source-commit $env:SOURCE_COMMIT `
+            --workflow-run-id '${{ github.run_id }}' `
+            --workflow-run-attempt '${{ github.run_attempt }}' `
+            --caller-client-sha256 $env:RETAILLENS_TRUSTED_HANDOFF_BROKER_SHA256 `
+            --policy-sha256 $env:RETAILLENS_HANDOFF_BROKER_POLICY_SHA256 `
+            --owner-sid S-1-5-18 `
+            --require-root-single-child `
+            --quarantine-before-grant `
+            --require-zero-source-open-handles `
+            --reverify-tree-after-revoke `
+            --remove-source-access |
+            Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned SYSTEM handoff broker rejected the verifier-to-publisher read-only transfer.' }
+          "verified_handoff_id=$leaf" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "archive_name=$env:EXPECTED_ARCHIVE_NAME" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "archive_sha256=$env:EXPECTED_ARCHIVE_SHA256" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "signer_thumbprint=$env:EXPECTED_SIGNER_THUMBPRINT" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "signing_evidence_sha256=$env:EXPECTED_SIGNING_EVIDENCE_SHA256" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "verification_evidence_sha256=$verificationEvidenceSha256" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "handoff_tree_sha256=$handoffTreeSha256" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Remove signed-verifier work root after exact evidence handoff
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:RETAILLENS_SIGNED_VERIFIER_WORK_ROOT -and (Test-Path -LiteralPath $env:RETAILLENS_SIGNED_VERIFIER_WORK_ROOT)) {
+            $root = [IO.Path]::GetFullPath($env:RETAILLENS_SIGNED_VERIFIER_WORK_ROOT)
+            $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+            if ([IO.Directory]::GetParent($root).FullName.TrimEnd('\') -cne $runnerTemp -or (Split-Path -Leaf $root) -notlike 'retaillens-signed-verifier-*') {
+              throw 'Signed-verifier cleanup escaped RUNNER_TEMP.'
+            }
+            $items = @(Get-Item -LiteralPath $root -Force; Get-ChildItem -LiteralPath $root -Recurse -Force)
+            if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+              throw 'Signed-verifier cleanup root contains a reparse point and cannot be recursively deleted.'
+            }
+            Remove-Item -LiteralPath $root -Recurse -Force
+            if (Test-Path -LiteralPath $root) { throw 'Signed-verifier work root remained.' }
+          }
+
+  publish_verified_release:
+    name: No-checkout exact-ID REST publisher with immutable ownership and fail-closed ambiguity
+    needs: [build_private_unsigned_candidate, verify_signed_candidate]
+    if: >-
+      needs.build_private_unsigned_candidate.result == 'success' &&
+      needs.verify_signed_candidate.result == 'success' &&
       github.repository == 'lzy2767865503-pixel/RetailLens-System' &&
       github.repository_id == '1313443623' &&
       github.repository_owner == 'lzy2767865503-pixel' &&
@@ -818,20 +1530,23 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.tag }}
       SOURCE_COMMIT: ${{ needs.build_private_unsigned_candidate.outputs.commit_sha }}
-      SIGNED_HANDOFF_ID: ${{ needs.sign_private_candidate.outputs.signed_handoff_id }}
-      EXPECTED_ARCHIVE_NAME: ${{ needs.sign_private_candidate.outputs.archive_name }}
-      EXPECTED_ARCHIVE_SHA256: ${{ needs.sign_private_candidate.outputs.archive_sha256 }}
-      EXPECTED_SIGNER_THUMBPRINT: ${{ needs.sign_private_candidate.outputs.signer_thumbprint }}
-      EXPECTED_SIGNING_EVIDENCE_SHA256: ${{ needs.sign_private_candidate.outputs.signing_evidence_sha256 }}
+      VERIFIED_HANDOFF_ID: ${{ needs.verify_signed_candidate.outputs.verified_handoff_id }}
+      EXPECTED_ARCHIVE_NAME: ${{ needs.verify_signed_candidate.outputs.archive_name }}
+      EXPECTED_ARCHIVE_SHA256: ${{ needs.verify_signed_candidate.outputs.archive_sha256 }}
+      EXPECTED_SIGNER_THUMBPRINT: ${{ needs.verify_signed_candidate.outputs.signer_thumbprint }}
+      EXPECTED_SIGNING_EVIDENCE_SHA256: ${{ needs.verify_signed_candidate.outputs.signing_evidence_sha256 }}
+      EXPECTED_VERIFICATION_EVIDENCE_SHA256: ${{ needs.verify_signed_candidate.outputs.verification_evidence_sha256 }}
+      EXPECTED_VERIFIED_HANDOFF_TREE_SHA256: ${{ needs.verify_signed_candidate.outputs.verified_handoff_tree_sha256 }}
       RETAILLENS_RELEASE_HANDOFF_ROOT: ${{ vars.RETAILLENS_RELEASE_HANDOFF_ROOT }}
       RETAILLENS_RELEASE_BUILD_SID: ${{ vars.RETAILLENS_RELEASE_BUILD_SID }}
       RETAILLENS_RELEASE_SIGNING_SID: ${{ vars.RETAILLENS_RELEASE_SIGNING_SID }}
+      RETAILLENS_RELEASE_VERIFIER_SID: ${{ vars.RETAILLENS_RELEASE_VERIFIER_SID }}
       RETAILLENS_RELEASE_PUBLISHER_SID: ${{ vars.RETAILLENS_RELEASE_PUBLISHER_SID }}
       RETAILLENS_RELEASE_TAG_RULESET_ID: "21631606"
       RETAILLENS_RELEASE_MAIN_RULESET_ID: "21633558"
 
     steps:
-      - name: Validate exact private signed handoff and LAI signatures without checking out repository code
+      - name: Validate exact lifecycle-verified private handoff and LAI signatures without checkout
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -842,22 +1557,32 @@ jobs:
             }
           }
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-          try { $currentSid = [string]$identity.User.Value } finally { $identity.Dispose() }
+          try {
+            $currentSid = [string]$identity.User.Value
+            $currentGroups = @($identity.Groups | ForEach-Object { [string]$_.Value })
+          } finally { $identity.Dispose() }
           $boundarySids = @(
             $env:RETAILLENS_RELEASE_BUILD_SID,
             $env:RETAILLENS_RELEASE_SIGNING_SID,
+            $env:RETAILLENS_RELEASE_VERIFIER_SID,
             $currentSid
           ) | Sort-Object -Unique
           if (
             $currentSid -cne $env:RETAILLENS_RELEASE_PUBLISHER_SID -or
             $env:RETAILLENS_RELEASE_BUILD_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
             $env:RETAILLENS_RELEASE_SIGNING_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
-            @($boundarySids).Count -ne 3 -or
+            $env:RETAILLENS_RELEASE_VERIFIER_SID -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
+            @($boundarySids).Count -ne 4 -or
             $env:SOURCE_COMMIT -notmatch '^[0-9a-f]{40}$' -or
             $env:EXPECTED_ARCHIVE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
             $env:EXPECTED_SIGNER_THUMBPRINT -notmatch '^[0-9a-f]{40}$' -or
-            $env:EXPECTED_SIGNING_EVIDENCE_SHA256 -notmatch '^[0-9a-f]{64}$'
+            $env:EXPECTED_SIGNING_EVIDENCE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:EXPECTED_VERIFICATION_EVIDENCE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+            $env:EXPECTED_VERIFIED_HANDOFF_TREE_SHA256 -notmatch '^[0-9a-f]{64}$'
           ) { throw 'Publisher identity or exact signed outputs are absent, malformed, or not isolated.' }
+          if ($currentSid -in @('S-1-5-18', 'S-1-5-32-544') -or 'S-1-5-32-544' -in $currentGroups) {
+            throw 'The publisher runner account must not be SYSTEM or a member of local Administrators.'
+          }
 
           function Test-PathInside([string]$Child, [string]$Parent) {
             $exactChild = [IO.Path]::GetFullPath($Child).TrimEnd('\')
@@ -865,25 +1590,59 @@ jobs:
             return $exactChild.Equals($exactParent, [StringComparison]::OrdinalIgnoreCase) -or
               $exactChild.StartsWith($exactParent + '\', [StringComparison]::OrdinalIgnoreCase)
           }
-          function Assert-ExactBoundaryAcl {
-            param([string]$Path, [string[]]$AllowedSids, [string]$Label, [switch]$RequireProtected)
+          function Assert-PublisherReadOnlyAcl {
+            param([string]$Path, [string]$PublisherSid, [string]$Label)
             $acl = Get-Acl -LiteralPath $Path
             $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
             $actual = @($rules | ForEach-Object { [string]$_.IdentityReference.Value } | Sort-Object -Unique)
-            $expected = @($AllowedSids | Sort-Object -Unique)
+            $expected = @($PublisherSid, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object -Unique
             if (
-              ($RequireProtected -and -not $acl.AreAccessRulesProtected) -or
+              -not $acl.AreAccessRulesProtected -or
               ($actual -join '|') -cne ($expected -join '|') -or
               @($rules | Where-Object { $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow }).Count -ne 0 -or
-              $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cnotin $expected
-            ) { throw "$Label ACL is not the exact allowlist." }
-            foreach ($sid in $expected) {
+              $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne 'S-1-5-18'
+            ) { throw "$Label ACL is not the exact protected publisher-read-only allowlist." }
+            foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
               if (@($rules | Where-Object {
                 [string]$_.IdentityReference.Value -ceq $sid -and
                 (($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq
                   [Security.AccessControl.FileSystemRights]::FullControl)
-              }).Count -eq 0) { throw "$Label lacks FullControl for an approved identity." }
+              }).Count -eq 0) { throw "$Label lacks administrative recovery FullControl." }
             }
+            $publisherRules = @($rules | Where-Object { [string]$_.IdentityReference.Value -ceq $PublisherSid })
+            $writeMask =
+              [Security.AccessControl.FileSystemRights]::WriteData -bor
+              [Security.AccessControl.FileSystemRights]::AppendData -bor
+              [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+              [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+              [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+              [Security.AccessControl.FileSystemRights]::Delete -bor
+              [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+              [Security.AccessControl.FileSystemRights]::TakeOwnership
+            if ($publisherRules.Count -ne 1 -or
+                (($publisherRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne
+                  [Security.AccessControl.FileSystemRights]::ReadAndExecute) -or
+                (($publisherRules[0].FileSystemRights -band $writeMask) -ne 0)) {
+              throw "$Label grants the publisher write/delete/ACL rights or lacks ReadAndExecute."
+            }
+          }
+          function Get-HandoffTreeSha256([string]$TreeRoot) {
+            $exactRoot = (Resolve-Path -LiteralPath $TreeRoot).Path
+            $treeItems = @(Get-Item -LiteralPath $exactRoot -Force; Get-ChildItem -LiteralPath $exactRoot -Recurse -Force)
+            if (@($treeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+              throw 'Publisher private handoff tree contains a reparse point.'
+            }
+            $rows = @(
+              foreach ($file in $treeItems | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName) {
+                $relative = [IO.Path]::GetRelativePath($exactRoot, $file.FullName).Replace('\', '/')
+                "$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) $($file.Length) $relative"
+              }
+            )
+            if ($rows.Count -lt 2) { throw 'Publisher private handoff tree is unexpectedly small.' }
+            $canonical = (($rows -join "`n") + "`n")
+            return [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))
+            ).ToLowerInvariant()
           }
 
           $privateRoot = [IO.Path]::GetFullPath($env:RETAILLENS_RELEASE_HANDOFF_ROOT).TrimEnd('\')
@@ -909,36 +1668,39 @@ jobs:
             if ($ancestor.FullName.TrimEnd('\').Equals($volumeRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { break }
             $ancestor = $ancestor.Parent
           }
-          $rootSids = @(
-            $env:RETAILLENS_RELEASE_BUILD_SID, $env:RETAILLENS_RELEASE_SIGNING_SID,
-            $currentSid, 'S-1-5-18', 'S-1-5-32-544'
-          ) | Sort-Object -Unique
-          Assert-ExactBoundaryAcl -Path $privateRoot -AllowedSids $rootSids -Label 'Publisher private handoff root' -RequireProtected
-          $inputRoot = [IO.Path]::GetFullPath((Join-Path $privateRoot $env:SIGNED_HANDOFF_ID))
-          if ([IO.Directory]::GetParent($inputRoot).FullName.TrimEnd('\') -cne $privateRoot) { throw 'Signed handoff escaped the private root.' }
+          Assert-PublisherReadOnlyAcl -Path $privateRoot -PublisherSid $currentSid -Label 'Publisher private handoff root'
+          $rootChildren = @(Get-ChildItem -LiteralPath $privateRoot -Force)
+          if ($rootChildren.Count -ne 1 -or $rootChildren[0].Name -cne $env:VERIFIED_HANDOFF_ID) {
+            throw 'Publisher received a non-exclusive private root or an unexpected handoff object.'
+          }
+          $inputRoot = [IO.Path]::GetFullPath((Join-Path $privateRoot $env:VERIFIED_HANDOFF_ID))
+          if ([IO.Directory]::GetParent($inputRoot).FullName.TrimEnd('\') -cne $privateRoot) { throw 'Verified handoff escaped the private root.' }
           $items = @(Get-Item -LiteralPath $inputRoot -Force; Get-ChildItem -LiteralPath $inputRoot -Recurse -Force)
           if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
-            throw 'Signed handoff contains a reparse point.'
+            throw 'Verified handoff contains a reparse point.'
           }
-          $allowedSids = @($env:RETAILLENS_RELEASE_SIGNING_SID, $currentSid, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object -Unique
-          Assert-ExactBoundaryAcl -Path $inputRoot -AllowedSids $allowedSids -Label 'Signed handoff root' -RequireProtected
+          Assert-PublisherReadOnlyAcl -Path $inputRoot -PublisherSid $currentSid -Label 'Verified handoff root'
           foreach ($item in $items | Select-Object -Skip 1) {
-            Assert-ExactBoundaryAcl -Path $item.FullName -AllowedSids $allowedSids -Label 'Signed handoff child'
+            Assert-PublisherReadOnlyAcl -Path $item.FullName -PublisherSid $currentSid -Label 'Verified handoff child'
+          }
+          if ((Get-HandoffTreeSha256 -TreeRoot $inputRoot) -cne $env:EXPECTED_VERIFIED_HANDOFF_TREE_SHA256) {
+            throw 'Verifier-to-publisher handoff tree changed before read-only publisher acceptance.'
           }
 
-          $recordPath = Join-Path $inputRoot 'signed-handoff.v1.json'
+          $recordPath = Join-Path $inputRoot 'verified-handoff.v1.json'
           $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
           $recordKeys = @($record.PSObject.Properties.Name | Sort-Object)
           $expectedRecordKeys = @(
-            'archiveName', 'archiveSha256', 'files', 'handoffKind', 'machineName', 'publisherSid',
+            'archiveName', 'archiveSha256', 'files', 'handoffKind', 'lifecycleRounds', 'machineName', 'publisherSid',
             'releaseTag', 'repository', 'repositoryId', 'schemaVersion', 'signerSubject',
             'signerThumbprint', 'signingEvidenceSha256', 'signingHarnessSha256', 'signingSid',
-            'sourceCommit', 'unsignedPayloadTreeSha256', 'workflowRunAttempt', 'workflowRunId'
+            'sourceCommit', 'unsignedPayloadTreeSha256', 'verificationEvidenceSha256', 'verifierHarnessSha256',
+            'verifierSid', 'workflowRunAttempt', 'workflowRunId'
           ) | Sort-Object
           if (
             ($recordKeys -join '|') -cne ($expectedRecordKeys -join '|') -or
             [int]$record.schemaVersion -ne 1 -or
-            [string]$record.handoffKind -cne 'private-signed-windows-publication' -or
+            [string]$record.handoffKind -cne 'private-verified-windows-publication' -or
             [string]$record.repository -cne 'lzy2767865503-pixel/RetailLens-System' -or
             [long]$record.repositoryId -ne 1313443623 -or
             [string]$record.sourceCommit -cne $env:SOURCE_COMMIT -or
@@ -947,14 +1709,18 @@ jobs:
             [int]$record.workflowRunAttempt -ne [int]'${{ github.run_attempt }}' -or
             [string]$record.machineName -cne [string]$env:COMPUTERNAME -or
             [string]$record.signingSid -cne $env:RETAILLENS_RELEASE_SIGNING_SID -or
+            [string]$record.verifierSid -cne $env:RETAILLENS_RELEASE_VERIFIER_SID -or
             [string]$record.publisherSid -cne $currentSid -or
             [string]$record.archiveName -cne $env:EXPECTED_ARCHIVE_NAME -or
             [string]$record.archiveSha256 -cne $env:EXPECTED_ARCHIVE_SHA256 -or
             [string]$record.signerThumbprint -cne $env:EXPECTED_SIGNER_THUMBPRINT -or
             [string]$record.signingEvidenceSha256 -cne $env:EXPECTED_SIGNING_EVIDENCE_SHA256 -or
+            [string]$record.verificationEvidenceSha256 -cne $env:EXPECTED_VERIFICATION_EVIDENCE_SHA256 -or
             [string]$record.signingHarnessSha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$record.verifierHarnessSha256 -notmatch '^[0-9a-f]{64}$' -or
+            [int]$record.lifecycleRounds -ne 2 -or
             [string]$record.unsignedPayloadTreeSha256 -notmatch '^[0-9a-f]{64}$'
-          ) { throw 'Signed private handoff identity/schema differs from this exact run.' }
+          ) { throw 'Verified private handoff identity/schema differs from this exact run.' }
           $publicEntries = @($record.files | Where-Object { $_.publicAsset -eq $true })
           $privateEntries = @($record.files | Where-Object { $_.publicAsset -eq $false })
           $version = $env:RELEASE_TAG.Substring(1)
@@ -963,10 +1729,10 @@ jobs:
             'THIRD_PARTY_NOTICES.txt', "retaillens-$version.spdx.json", 'STAGING-INVENTORY.json'
           ) | Sort-Object
           if (
-            $publicEntries.Count -ne 6 -or $privateEntries.Count -ne 1 -or
-            [string]$privateEntries[0].name -cne 'SIGNING-BOUNDARY-EVIDENCE.json' -or
+            $publicEntries.Count -ne 6 -or $privateEntries.Count -ne 2 -or
+            (@($privateEntries.name | Sort-Object) -join '|') -cne 'SIGNED-VERIFICATION-EVIDENCE.json|SIGNING-BOUNDARY-EVIDENCE.json' -or
             (@($publicEntries.name | Sort-Object) -join '|') -cne ($expectedPublicNames -join '|')
-          ) { throw 'Signed handoff public/private inventory is not exact.' }
+          ) { throw 'Verified handoff public/private inventory is not exact.' }
           $seenNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
           foreach ($entry in @($record.files)) {
             $entryKeys = @($entry.PSObject.Properties.Name | Sort-Object)
@@ -974,26 +1740,27 @@ jobs:
                 [IO.Path]::GetFileName([string]$entry.name) -cne [string]$entry.name -or
                 -not $seenNames.Add([string]$entry.name) -or
                 [string]$entry.sha256 -notmatch '^[0-9a-f]{64}$' -or [long]$entry.size -le 0) {
-              throw 'Signed handoff inventory entry is malformed.'
+              throw 'Verified handoff inventory entry is malformed.'
             }
             $file = Join-Path $inputRoot ([string]$entry.name)
             if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
                 (Get-Item -LiteralPath $file).Length -ne [long]$entry.size -or
                 (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$entry.sha256) {
-              throw "Signed handoff file differs: $($entry.name)"
+              throw "Verified handoff file differs: $($entry.name)"
             }
           }
           $physicalFiles = @(Get-ChildItem -LiteralPath $inputRoot -File -Force)
-          if ($physicalFiles.Count -ne 8) { throw 'Signed handoff contains an unrecorded or missing file.' }
+          if ($physicalFiles.Count -ne 9) { throw 'Verified handoff contains an unrecorded or missing file.' }
           foreach ($physicalFile in $physicalFiles) {
-            if ($physicalFile.Name -cne 'signed-handoff.v1.json' -and -not $seenNames.Contains($physicalFile.Name)) {
-              throw "Signed handoff contains an unrecorded file: $($physicalFile.Name)"
+            if ($physicalFile.Name -cne 'verified-handoff.v1.json' -and -not $seenNames.Contains($physicalFile.Name)) {
+              throw "Verified handoff contains an unrecorded file: $($physicalFile.Name)"
             }
           }
           if (
             (Get-FileHash -LiteralPath (Join-Path $inputRoot $env:EXPECTED_ARCHIVE_NAME) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_ARCHIVE_SHA256 -or
-            (Get-FileHash -LiteralPath (Join-Path $inputRoot 'SIGNING-BOUNDARY-EVIDENCE.json') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_SIGNING_EVIDENCE_SHA256
-          ) { throw 'Signed archive or signing evidence differs from the signing job outputs.' }
+            (Get-FileHash -LiteralPath (Join-Path $inputRoot 'SIGNING-BOUNDARY-EVIDENCE.json') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_SIGNING_EVIDENCE_SHA256 -or
+            (Get-FileHash -LiteralPath (Join-Path $inputRoot 'SIGNED-VERIFICATION-EVIDENCE.json') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_VERIFICATION_EVIDENCE_SHA256
+          ) { throw 'Verified archive, signing evidence, or lifecycle evidence differs from the verifier outputs.' }
 
           $probe = Join-Path $env:RUNNER_TEMP "retaillens-publisher-probe-${{ github.run_id }}-${{ github.run_attempt }}"
           try {
@@ -1024,7 +1791,13 @@ jobs:
               ) { throw "Publication archive PE signature is invalid: $($pe.Name)" }
             }
           } finally {
-            if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Recurse -Force }
+            if (Test-Path -LiteralPath $probe) {
+              $probeItems = @(Get-Item -LiteralPath $probe -Force; Get-ChildItem -LiteralPath $probe -Recurse -Force)
+              if (@($probeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+                throw 'Publisher static probe contains a reparse point and cannot be recursively deleted.'
+              }
+              Remove-Item -LiteralPath $probe -Recurse -Force
+            }
           }
           "RETAILLENS_PUBLICATION_INPUT_ROOT=$inputRoot" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -1442,17 +2215,42 @@ jobs:
           }
           Write-Host "GitHub Release ID $($ownership.id) is public only after exact repository/tag/ruleset, immutable ownership, exact asset-ID metadata, and authenticated same-byte downloads passed."
 
-      - name: Remove successful private signed handoff only after exact public verification
+      - name: Reverify immutable read-only handoff after publication and retain it for privileged cleanup
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          function Get-HandoffTreeSha256([string]$TreeRoot) {
+            $exactRoot = (Resolve-Path -LiteralPath $TreeRoot).Path
+            $treeItems = @(Get-Item -LiteralPath $exactRoot -Force; Get-ChildItem -LiteralPath $exactRoot -Recurse -Force)
+            if (@($treeItems | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
+              throw 'Successful publisher handoff recheck found a reparse point.'
+            }
+            $rows = @(
+              foreach ($file in $treeItems | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName) {
+                $relative = [IO.Path]::GetRelativePath($exactRoot, $file.FullName).Replace('\', '/')
+                "$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) $($file.Length) $relative"
+              }
+            )
+            if ($rows.Count -lt 2) { throw 'Successful publisher handoff tree is unexpectedly small.' }
+            $canonical = (($rows -join "`n") + "`n")
+            return [Convert]::ToHexString(
+              [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($canonical))
+            ).ToLowerInvariant()
+          }
           $inputRoot = [IO.Path]::GetFullPath($env:RETAILLENS_PUBLICATION_INPUT_ROOT)
           $privateRoot = [IO.Path]::GetFullPath($env:RETAILLENS_RELEASE_HANDOFF_ROOT).TrimEnd('\')
-          if ([IO.Directory]::GetParent($inputRoot).FullName.TrimEnd('\') -cne $privateRoot -or (Split-Path -Leaf $inputRoot) -cne $env:SIGNED_HANDOFF_ID) {
-            throw 'Successful private signed handoff cleanup escaped its exact root.'
+          if ([IO.Directory]::GetParent($inputRoot).FullName.TrimEnd('\') -cne $privateRoot -or (Split-Path -Leaf $inputRoot) -cne $env:VERIFIED_HANDOFF_ID) {
+            throw 'Successful private verified handoff recheck escaped its exact root.'
           }
           $items = @(Get-Item -LiteralPath $inputRoot -Force; Get-ChildItem -LiteralPath $inputRoot -Recurse -Force)
           if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count -ne 0) {
-            throw 'Successful private signed handoff cleanup found a reparse point.'
+            throw 'Successful private verified handoff recheck found a reparse point.'
           }
-          Remove-Item -LiteralPath $inputRoot -Recurse -Force
-          if (Test-Path -LiteralPath $inputRoot) { throw 'Successful private signed handoff remained after cleanup.' }
+          if (
+            (Get-HandoffTreeSha256 -TreeRoot $inputRoot) -cne $env:EXPECTED_VERIFIED_HANDOFF_TREE_SHA256 -or
+            (Get-FileHash -LiteralPath (Join-Path $inputRoot $env:EXPECTED_ARCHIVE_NAME) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_ARCHIVE_SHA256 -or
+            (Get-FileHash -LiteralPath (Join-Path $inputRoot 'SIGNING-BOUNDARY-EVIDENCE.json') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_SIGNING_EVIDENCE_SHA256 -or
+            (Get-FileHash -LiteralPath (Join-Path $inputRoot 'SIGNED-VERIFICATION-EVIDENCE.json') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:EXPECTED_VERIFICATION_EVIDENCE_SHA256
+          ) { throw 'Successful private verified handoff changed during publication.' }
+          Write-Host 'Publisher retains ReadAndExecute-only access. SYSTEM/Administrators must archive or remove the verified handoff before the next serialized release run.'

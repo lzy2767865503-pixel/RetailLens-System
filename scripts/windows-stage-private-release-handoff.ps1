@@ -6,8 +6,13 @@ param(
   [Parameter(Mandatory = $true)] [string]$SourceCommit,
   [Parameter(Mandatory = $true)] [string]$ReleaseTag,
   [Parameter(Mandatory = $true)] [long]$RepositoryId,
+  [Parameter(Mandatory = $true)] [string]$ExpectedBuildSid,
   [Parameter(Mandatory = $true)] [string]$SigningSid,
-  [Parameter(Mandatory = $true)] [string]$PublisherSid
+  [Parameter(Mandatory = $true)] [string]$VerifierSid,
+  [Parameter(Mandatory = $true)] [string]$PublisherSid,
+  [Parameter(Mandatory = $true)] [string]$HandoffBrokerPath,
+  [Parameter(Mandatory = $true)] [string]$HandoffBrokerSha256,
+  [Parameter(Mandatory = $true)] [string]$HandoffBrokerPolicySha256
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,8 +25,12 @@ if (
   $SourceCommit -notmatch '^[0-9a-f]{40}$' -or
   $ReleaseTag -notmatch '^v\d+\.\d+\.\d+$' -or
   $RepositoryId -ne 1313443623 -or
+  $ExpectedBuildSid -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
   $SigningSid -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
-  $PublisherSid -notmatch '^S-1-(?:\d+-){1,14}\d+$'
+  $VerifierSid -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
+  $PublisherSid -notmatch '^S-1-(?:\d+-){1,14}\d+$' -or
+  $HandoffBrokerSha256 -notmatch '^[0-9a-f]{64}$' -or
+  $HandoffBrokerPolicySha256 -notmatch '^[0-9a-f]{64}$'
 ) { throw "Private Windows release handoff identity is invalid." }
 
 function Test-PathInside([string]$Child, [string]$Parent) {
@@ -40,6 +49,13 @@ function Assert-NoReparseTree([string]$Path, [string]$Label) {
   ).Count -ne 0) { throw "$Label contains a reparse point." }
 }
 
+function Remove-ReparseFreeTree([string]$Path, [string]$Label) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  Assert-NoReparseTree -Path $Path -Label $Label
+  Remove-Item -LiteralPath $Path -Recurse -Force
+  if (Test-Path -LiteralPath $Path) { throw "$Label remained after recursive cleanup." }
+}
+
 function Get-AclSids([System.Security.AccessControl.FileSystemSecurity]$Acl) {
   return @(
     $Acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
@@ -49,7 +65,13 @@ function Get-AclSids([System.Security.AccessControl.FileSystemSecurity]$Acl) {
 }
 
 function Assert-ExactAcl {
-  param([string]$Path, [string[]]$AllowedSids, [string]$Label, [switch]$RequireProtected)
+  param(
+    [string]$Path,
+    [string[]]$AllowedSids,
+    [string]$OwnerSid,
+    [string]$Label,
+    [switch]$RequireProtected
+  )
   $acl = Get-Acl -LiteralPath $Path
   if ($RequireProtected -and -not $acl.AreAccessRulesProtected) { throw "$Label inherits ACL entries." }
   $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
@@ -65,8 +87,8 @@ function Assert-ExactAcl {
         [System.Security.AccessControl.FileSystemRights]::FullControl)
     }).Count -eq 0) { throw "$Label lacks FullControl for an approved principal." }
   }
-  if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cnotin $expected) {
-    throw "$Label owner is outside the exact principal set."
+  if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -cne $OwnerSid) {
+    throw "$Label owner is not the exact approved owner."
   }
 }
 
@@ -105,7 +127,34 @@ function Get-CanonicalInventory([string]$Root, [string]$Prefix, [string]$Role) {
   return @($rows)
 }
 
+function Get-HandoffTreeSha256([string]$Root) {
+  $exactRoot = (Resolve-Path -LiteralPath $Root).Path
+  Assert-NoReparseTree -Path $exactRoot -Label "Private release handoff tree"
+  $rows = @(
+    foreach ($file in Get-ChildItem -LiteralPath $exactRoot -File -Recurse -Force | Sort-Object FullName) {
+      $relative = [System.IO.Path]::GetRelativePath($exactRoot, $file.FullName).Replace("\", "/")
+      "$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()) $($file.Length) $relative"
+    }
+  )
+  if ($rows.Count -lt 2) { throw "Private release handoff tree is unexpectedly small." }
+  $canonical = (($rows -join "`n") + "`n")
+  return [Convert]::ToHexString(
+    [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($canonical))
+  ).ToLowerInvariant()
+}
+
 $projectRoot = Split-Path $PSScriptRoot -Parent
+$broker = (Resolve-Path -LiteralPath $HandoffBrokerPath).Path
+$brokerItem = Get-Item -LiteralPath $broker -Force
+$workspacePrefix = [System.IO.Path]::GetFullPath($projectRoot).TrimEnd("\") + "\"
+$runnerTempPrefix = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd("\") + "\"
+if (
+  $brokerItem.PSIsContainer -or
+  ($brokerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+  $broker.StartsWith($workspacePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+  $broker.StartsWith($runnerTempPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+  (Get-FileHash -LiteralPath $broker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $HandoffBrokerSha256
+) { throw "Pinned out-of-repository SYSTEM handoff broker client is absent, linked, misplaced, or hash-mismatched." }
 $package = Get-Content -LiteralPath (Join-Path $projectRoot "package.json") -Raw | ConvertFrom-Json
 $version = [string]$package.version
 if ($ReleaseTag -cne "v$version") { throw "Release tag does not match package version." }
@@ -167,13 +216,30 @@ while ($ancestor) {
 }
 
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-try { $buildSid = [string]$identity.User.Value } finally { $identity.Dispose() }
-if ($buildSid -ceq $SigningSid -or $buildSid -ceq $PublisherSid -or $SigningSid -ceq $PublisherSid) {
-  throw "Build, signing, and publisher runner accounts must have three distinct SIDs."
+try {
+  $buildSid = [string]$identity.User.Value
+  $buildGroups = @($identity.Groups | ForEach-Object { [string]$_.Value })
+} finally { $identity.Dispose() }
+if ($buildSid -in @("S-1-5-18", "S-1-5-32-544") -or "S-1-5-32-544" -in $buildGroups) {
+  throw "The build runner account must not be SYSTEM or a member of local Administrators."
 }
-$rootSids = @($buildSid, $SigningSid, $PublisherSid, "S-1-5-18", "S-1-5-32-544") | Sort-Object -Unique
-$inputSids = @($buildSid, $SigningSid, "S-1-5-18", "S-1-5-32-544") | Sort-Object -Unique
-Assert-ExactAcl -Path $exactPrivateRoot -AllowedSids $rootSids -Label "Private release handoff root" -RequireProtected
+if ($buildSid -cne $ExpectedBuildSid) {
+  throw "The build runner account is not the exact protected build SID."
+}
+if (@(@($buildSid, $SigningSid, $VerifierSid, $PublisherSid) | Sort-Object -Unique).Count -ne 4) {
+  throw "Build, signing, signed-verifier, and publisher runner accounts must have four distinct SIDs."
+}
+$rootSids = @($buildSid, "S-1-5-18", "S-1-5-32-544") | Sort-Object -Unique
+$inputSids = @($buildSid, "S-1-5-18", "S-1-5-32-544") | Sort-Object -Unique
+Assert-ExactAcl `
+  -Path $exactPrivateRoot `
+  -AllowedSids $rootSids `
+  -OwnerSid "S-1-5-18" `
+  -Label "Private release handoff root" `
+  -RequireProtected
+if (@(Get-ChildItem -LiteralPath $exactPrivateRoot -Force).Count -ne 0) {
+  throw "Private release handoff root must be empty before the serialized build stage starts."
+}
 
 $leaf = "retaillens-release-unsigned-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$($SourceCommit.Substring(0, 12)).ready"
 $finalRoot = Join-Path $exactPrivateRoot $leaf
@@ -210,7 +276,7 @@ try {
     ) { throw "Private release handoff copy differs: $($entry.path)" }
   }
   $record = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     handoffKind = "private-unsigned-windows-release"
     repository = "lzy2767865503-pixel/RetailLens-System"
     repositoryId = $RepositoryId
@@ -225,6 +291,7 @@ try {
     machineName = [string]$env:COMPUTERNAME
     buildSid = $buildSid
     signingSid = $SigningSid
+    verifierSid = $VerifierSid
     publisherSid = $PublisherSid
     unsignedPayloadTreeSha256 = $payloadTreeSha256
     fileCount = $allInventory.Count
@@ -232,14 +299,55 @@ try {
     githubArtifactTransfer = $false
   }
   [System.IO.File]::WriteAllText(
-    (Join-Path $incompleteRoot "unsigned-handoff.v1.json"),
+    (Join-Path $incompleteRoot "unsigned-handoff.v2.json"),
     (($record | ConvertTo-Json -Depth 6 -Compress) + "`n"),
     [System.Text.UTF8Encoding]::new($false)
   )
-  Assert-ExactAcl -Path $incompleteRoot -AllowedSids $inputSids -Label "Unsigned release handoff" -RequireProtected
+  Assert-ExactAcl `
+    -Path $incompleteRoot `
+    -AllowedSids $inputSids `
+    -OwnerSid $buildSid `
+    -Label "Unsigned release handoff" `
+    -RequireProtected
   [System.IO.Directory]::Move($incompleteRoot, $finalRoot)
   $moved = $true
-  Assert-ExactAcl -Path $finalRoot -AllowedSids $inputSids -Label "Final unsigned release handoff" -RequireProtected
+  Assert-ExactAcl `
+    -Path $finalRoot `
+    -AllowedSids $inputSids `
+    -OwnerSid $buildSid `
+    -Label "Final unsigned release handoff" `
+    -RequireProtected
+  $handoffTreeSha256 = Get-HandoffTreeSha256 -Root $finalRoot
+  $workspaceWindowsRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "release/windows"))
+  $workspaceMetadataRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "release/metadata"))
+  if (
+    -not (Test-PathInside -Child $payloadRoot -Parent $workspaceWindowsRoot) -or
+    -not $metadataRoot.Equals($workspaceMetadataRoot, [System.StringComparison]::OrdinalIgnoreCase)
+  ) { throw "Unsigned workspace cleanup roots are not the exact repository release roots." }
+  Remove-ReparseFreeTree -Path $workspaceWindowsRoot -Label "Unsigned Windows workspace tree"
+  Remove-ReparseFreeTree -Path $workspaceMetadataRoot -Label "Unsigned metadata workspace tree"
+  Write-Host "Unsigned Windows bytes were removed from the workspace and were never uploaded as a GitHub artifact."
+  & $broker `
+    transition-retaillens-release-handoff `
+    --private-root $exactPrivateRoot `
+    --handoff-id $leaf `
+    --from-sid $buildSid `
+    --to-sid $SigningSid `
+    --target-access full-control `
+    --expected-tree-sha256 $handoffTreeSha256 `
+    --source-commit $SourceCommit `
+    --workflow-run-id $env:GITHUB_RUN_ID `
+    --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+    --caller-client-sha256 $HandoffBrokerSha256 `
+    --policy-sha256 $HandoffBrokerPolicySha256 `
+    --owner-sid S-1-5-18 `
+    --require-root-single-child `
+    --quarantine-before-grant `
+    --require-zero-source-open-handles `
+    --reverify-tree-after-revoke `
+    --remove-source-access |
+    Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Pinned SYSTEM handoff broker rejected the build-to-signer transfer." }
 } catch {
   if ($moved -and (Test-Path -LiteralPath $finalRoot)) { Remove-Item -LiteralPath $finalRoot -Recurse -Force -ErrorAction SilentlyContinue }
   if (Test-Path -LiteralPath $incompleteRoot) { Remove-Item -LiteralPath $incompleteRoot -Recurse -Force -ErrorAction SilentlyContinue }
@@ -249,5 +357,6 @@ try {
 Write-Output ([pscustomobject]@{
   handoffId = $leaf
   unsignedPayloadTreeSha256 = $payloadTreeSha256
+  handoffTreeSha256 = $handoffTreeSha256
   fileCount = $allInventory.Count
 })
