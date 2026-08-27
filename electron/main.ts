@@ -1,4 +1,5 @@
 import type { Server } from "node:http";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -60,6 +61,9 @@ let localOrigin = "";
 let smokeTestSettled = false;
 
 const STORE_UI_PROOF_DIRECTORY = "retaillens-store-ui-proof";
+const STORE_SCREENSHOT_DIRECTORY = "store-listing-screenshots";
+const STORE_SCREENSHOT_WIDTH = 1366;
+const STORE_SCREENSHOT_HEIGHT = 768;
 
 function storeUiProofPaths() {
   const directory = path.join(
@@ -69,8 +73,277 @@ function storeUiProofPaths() {
   return {
     directory,
     probe: path.join(directory, "probe.json"),
-    ready: path.join(directory, "ui_ready.json")
+    ready: path.join(directory, "ui_ready.json"),
+    screenshots: path.join(directory, STORE_SCREENSHOT_DIRECTORY)
   };
+}
+
+const wait = (milliseconds: number) =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitForRendererCondition(
+  window: BrowserWindow,
+  expression: string,
+  label: string
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (window.isDestroyed()) {
+      throw new Error(`The renderer closed while waiting for ${label}.`);
+    }
+    const satisfied = await window.webContents.executeJavaScript(
+      `Boolean(${expression})`,
+      true
+    );
+    if (satisfied === true) return;
+    await wait(100);
+  }
+  throw new Error(`Timed out waiting for ${label}.`);
+}
+
+async function clickRendererControl(
+  window: BrowserWindow,
+  script: string,
+  label: string
+): Promise<void> {
+  const clicked = await window.webContents.executeJavaScript(script, true);
+  if (clicked !== true) {
+    throw new Error(`Packaged screenshot automation could not click ${label}.`);
+  }
+  await wait(350);
+}
+
+async function assertScreenshotPrivacy(window: BrowserWindow): Promise<void> {
+  const result = (await window.webContents.executeJavaScript(
+    `(() => {
+      const bodyText = document.body?.innerText ?? "";
+      const patterns = [
+        /(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}/,
+        /\\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\\b/,
+        /\\bgithub_pat_[A-Za-z0-9_]{20,}\\b/,
+        /\\bAKIA[0-9A-Z]{16}\\b/,
+        /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+        /\\bBearer\\s+[A-Za-z0-9._~+\\/-]{20,}/i,
+        /\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b/i,
+        /(?:C:\\\\Users\\\\|\\/Users\\/)[^\\s]+/i
+      ];
+      const secretInputs = [...document.querySelectorAll("input")].filter((input) => {
+        const autocomplete = input.getAttribute("autocomplete") ?? "";
+        return Boolean(input.value) && (
+          input.type === "password" ||
+          autocomplete === "current-password" ||
+          autocomplete === "new-password"
+        );
+      });
+      const storageHasSecret = Object.entries(localStorage).some(([key, value]) =>
+        /(?:api.?key|password|token|secret)/i.test(key) || patterns.some((pattern) => pattern.test(value))
+      );
+      return {
+        bodyLength: bodyText.trim().length,
+        productVisible: bodyText.includes(${JSON.stringify(WINDOWS_PRODUCT_NAME)}),
+        authorVisible: bodyText.includes(${JSON.stringify(WINDOWS_AUTHOR_NAME)}),
+        sensitivePatternCount: patterns.filter((pattern) => pattern.test(bodyText)).length,
+        secretBearingInputCount: secretInputs.length,
+        storageHasSecret
+      };
+    })()`,
+    true
+  )) as {
+    bodyLength: number;
+    productVisible: boolean;
+    authorVisible: boolean;
+    sensitivePatternCount: number;
+    secretBearingInputCount: number;
+    storageHasSecret: boolean;
+  };
+  if (
+    result.bodyLength < 100 ||
+    !result.productVisible ||
+    !result.authorVisible ||
+    result.sensitivePatternCount !== 0 ||
+    result.secretBearingInputCount !== 0 ||
+    result.storageHasSecret
+  ) {
+    throw new Error(
+      "Store screenshot privacy gate found missing attribution or potentially sensitive visible/local data."
+    );
+  }
+}
+
+async function captureStoreScreenshots(
+  window: BrowserWindow,
+  probe: StoreUiProbe
+): Promise<void> {
+  if (!probe.captureStoreScreenshots) return;
+  if (probe.screenshotRound !== 2) {
+    throw new Error("Store screenshots may be captured only in lifecycle round 2.");
+  }
+
+  const paths = storeUiProofPaths();
+  await mkdir(paths.screenshots, { recursive: false });
+  window.setContentSize(
+    STORE_SCREENSHOT_WIDTH,
+    STORE_SCREENSHOT_HEIGHT,
+    false
+  );
+  await waitForRendererCondition(
+    window,
+    `window.innerWidth === ${STORE_SCREENSHOT_WIDTH} && window.innerHeight === ${STORE_SCREENSHOT_HEIGHT}`,
+    "the exact 1366 x 768 packaged viewport"
+  );
+
+  const images: Array<{
+    fileName: string;
+    height: number;
+    sha256: string;
+    size: number;
+    viewId: string;
+    width: number;
+  }> = [];
+  const capture = async (fileName: string, viewId: string) => {
+    await window.webContents.executeJavaScript(
+      "window.scrollTo({ top: 0, left: 0, behavior: 'instant' }); true",
+      true
+    );
+    await wait(200);
+    await assertScreenshotPrivacy(window);
+    const image = await window.webContents.capturePage({
+      x: 0,
+      y: 0,
+      width: STORE_SCREENSHOT_WIDTH,
+      height: STORE_SCREENSHOT_HEIGHT
+    });
+    const dimensions = image.getSize();
+    if (
+      dimensions.width !== STORE_SCREENSHOT_WIDTH ||
+      dimensions.height !== STORE_SCREENSHOT_HEIGHT
+    ) {
+      throw new Error(
+        `Packaged screenshot ${fileName} was ${dimensions.width} x ${dimensions.height}, not 1366 x 768.`
+      );
+    }
+    const png = image.toPNG();
+    if (png.length < 20_000 || png.length > 15_000_000) {
+      throw new Error(`Packaged screenshot ${fileName} has an implausible PNG size.`);
+    }
+    const temporaryPath = path.join(paths.screenshots, `${fileName}.tmp`);
+    const finalPath = path.join(paths.screenshots, fileName);
+    await writeFile(temporaryPath, png, { flag: "wx" });
+    await rename(temporaryPath, finalPath);
+    images.push({
+      fileName,
+      height: dimensions.height,
+      sha256: createHash("sha256").update(png).digest("hex"),
+      size: png.length,
+      viewId,
+      width: dimensions.width
+    });
+  };
+
+  await clickRendererControl(
+    window,
+    `(() => {
+      const button = [...document.querySelectorAll("button")].find((candidate) =>
+        /(?:载入示例|Load demo)/.test(candidate.textContent ?? "")
+      );
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+      button.click();
+      return true;
+    })()`,
+    "the built-in demo loader"
+  );
+  await waitForRendererCondition(
+    window,
+    `document.querySelector(".coverage-value")?.textContent?.trim() !== "0%"`,
+    "the built-in demo assessment"
+  );
+  await capture("01-assessment-demo.png", "assessment-demo");
+
+  await clickRendererControl(
+    window,
+    `(() => {
+      const steps = [...document.querySelectorAll(".step-button")];
+      const button = steps[8];
+      if (!(button instanceof HTMLButtonElement) || steps.length !== 9) return false;
+      button.click();
+      return true;
+    })()`,
+    "enterprise input step 9"
+  );
+  await waitForRendererCondition(
+    window,
+    `document.querySelector(".step-button:nth-of-type(9)") !== null || document.body.innerText.includes("第 9 步") || document.body.innerText.includes("Step 9 of 9")`,
+    "enterprise input workbench"
+  );
+  await capture("02-enterprise-inputs.png", "enterprise-inputs");
+
+  await clickRendererControl(
+    window,
+    `(() => {
+      const button = document.querySelector(".bottom-action-bar .button.primary");
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+      button.click();
+      return true;
+    })()`,
+    "the deterministic assessment action"
+  );
+  await waitForRendererCondition(
+    window,
+    `document.querySelector(".report-shell") !== null && document.body.innerText.includes("74.3 / 100")`,
+    "the exact built-in-demo report"
+  );
+  await capture("03-executive-workpaper.png", "executive-workpaper");
+
+  await clickRendererControl(
+    window,
+    `(() => {
+      const button = [...document.querySelectorAll(".report-nav-button")].find((candidate) =>
+        /(?:战略矩阵|Strategy matrices)/.test(candidate.textContent ?? "")
+      );
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`,
+    "the strategy matrices report tab"
+  );
+  await waitForRendererCondition(
+    window,
+    `document.querySelector('[data-testid="strategy-matrices"]') !== null`,
+    "the strategy matrices view"
+  );
+  await capture("04-strategy-matrices.png", "strategy-matrices");
+
+  const manifest = {
+    schemaVersion: 1,
+    evidenceKind: "exact-packaged-store-candidate-screenshots",
+    candidateSha256: probe.candidateSha256,
+    version: probe.version,
+    nonce: probe.nonce,
+    screenshotRound: probe.screenshotRound,
+    captureSource: "ELECTRON_WEB_CONTENTS_CAPTURE_PAGE",
+    dataset: "BUILT_IN_DEMO_ONLY",
+    privacyGatePassed: true,
+    sensitiveTextPatternCount: 0,
+    secretBearingInputCount: 0,
+    width: STORE_SCREENSHOT_WIDTH,
+    height: STORE_SCREENSHOT_HEIGHT,
+    screenshotCount: images.length,
+    images,
+    generatedAt: new Date().toISOString()
+  };
+  const manifestTemporaryPath = path.join(
+    paths.screenshots,
+    "store-screenshot-capture.v1.json.tmp"
+  );
+  const manifestPath = path.join(
+    paths.screenshots,
+    "store-screenshot-capture.v1.json"
+  );
+  await writeFile(
+    manifestTemporaryPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    { encoding: "utf8", flag: "wx" }
+  );
+  await rename(manifestTemporaryPath, manifestPath);
 }
 
 function finishSmokeTest(exitCode: number, message: string): void {
@@ -192,6 +465,7 @@ async function handleRendererLoaded(window: BrowserWindow): Promise<void> {
     storeProbe = await readStoreUiProbe();
     const dom = await waitForRendererDom(window);
     if (storeProbe) {
+      await captureStoreScreenshots(window, storeProbe);
       await writeStoreUiReadyEvidence(storeProbe, dom);
     }
 

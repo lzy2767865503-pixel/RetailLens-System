@@ -1,6 +1,6 @@
 # Microsoft Store Listing — English (draft)
 
-Status: copy-ready draft; Partner Center identity is reserved (Store ID `9NVNLQWQBKHD`), while age rating, markets, screenshots, certification, and public URL remain unverified.
+Status: copy-ready draft; Partner Center identity is reserved (Store ID `9NVNLQWQBKHD`). The Windows workflow requires four privacy-gated 1366 x 768 screenshots from the exact installed QA candidate, but no screenshot is claimed until that native run passes; age rating, markets, certification, and public URL also remain unverified.
 
 ## Product name
 

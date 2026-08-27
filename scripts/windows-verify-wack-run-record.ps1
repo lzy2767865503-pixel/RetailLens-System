@@ -7,7 +7,8 @@ param(
   [Parameter(Mandatory = $true)] [string]$ExpectedCommitSha,
   [Parameter(Mandatory = $true)] [string]$ExpectedWorkflowRef,
   [Parameter(Mandatory = $true)] [string]$ExpectedWorkflowRunId,
-  [Parameter(Mandatory = $true)] [string]$ExpectedWorkflowRunAttempt
+  [Parameter(Mandatory = $true)] [string]$ExpectedWorkflowRunAttempt,
+  [Parameter(Mandatory = $true)] [string]$ExpectedApprovedWackFileVersion
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,16 +26,19 @@ function Assert-ExactKeys($Object, [string[]]$ExpectedKeys, [string]$Context) {
 
 $state = Get-Content -LiteralPath (Resolve-Path -LiteralPath $StatePath).Path -Raw | ConvertFrom-Json
 $package = (Resolve-Path -LiteralPath ([string]$state.candidatePath)).Path
+$submission = (Resolve-Path -LiteralPath ([string]$state.submissionPath)).Path
 $report = (Resolve-Path -LiteralPath $ReportPath).Path
 $recordPath = (Resolve-Path -LiteralPath $RunRecordPath).Path
 $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
 Assert-ExactKeys $state @(
   "applicationId", "candidatePath", "candidateSha256", "certificateFriendlyName",
-  "certificateThumbprint", "executable", "identityName", "productVersion", "publisher",
-  "runId", "runRoot", "schemaVersion", "unsignedSourceDestroyed", "version"
+  "certificateThumbprint", "executable", "identityName", "payloadFileCount",
+  "payloadTreeSha256", "privateHandoffRetained", "productVersion", "publisher",
+  "runId", "runRoot", "schemaVersion", "submissionPath", "submissionSha256",
+  "unsignedWorkspaceDestroyed", "version"
 ) "Store candidate state"
 if (
-  $state.schemaVersion -ne 1 -or
+  $state.schemaVersion -ne 2 -or
   $state.identityName -cne "LAIZEYU.RetailDecisionStudiobyLAIZEYU" -or
   $state.publisher -cne "CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8" -or
   $state.applicationId -cne "RetailDecisionStudio" -or
@@ -42,16 +46,26 @@ if (
   $state.productVersion -notmatch '^\d+\.\d+\.\d+$' -or
   $state.version -cne "$($state.productVersion).0" -or
   $state.candidateSha256 -notmatch '^[0-9a-f]{64}$' -or
+  $state.submissionSha256 -notmatch '^[0-9a-f]{64}$' -or
+  [int]$state.payloadFileCount -lt 4 -or
+  $state.payloadTreeSha256 -notmatch '^[0-9a-f]{64}$' -or
   $state.certificateThumbprint -notmatch '^[0-9a-f]{40}$' -or
-  $state.unsignedSourceDestroyed -ne $true
+  $state.unsignedWorkspaceDestroyed -ne $true -or
+  $state.privateHandoffRetained -ne $false
 ) { throw "Store candidate state identity is not exact." }
 $runRoot = (Resolve-Path -LiteralPath ([string]$state.runRoot)).Path
 $runRootItem = Get-Item -LiteralPath $runRoot -Force
+$packageItem = Get-Item -LiteralPath $package -Force
+$submissionItem = Get-Item -LiteralPath $submission -Force
 if (
   -not $runRootItem.PSIsContainer -or
   ($runRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+  ($packageItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+  ($submissionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
   -not (Test-RetailLensPathWithin -CandidatePath $package -RootPath $runRoot) -or
-  (Split-Path -Leaf $package) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64.appx" -or
+  (Split-Path -Leaf $package) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64-qa-signed.appx" -or
+  -not (Test-RetailLensPathWithin -CandidatePath $submission -RootPath $runRoot) -or
+  (Split-Path -Leaf $submission) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64.appx" -or
   -not (Test-RetailLensPathWithin -CandidatePath $report -RootPath $runRoot) -or
   -not (Test-RetailLensPathWithin -CandidatePath $recordPath -RootPath $runRoot)
 ) { throw "WACK same-run verifier path boundary failed." }
@@ -71,7 +85,7 @@ Assert-ExactKeys $record.report @(
   "testCount", "testInventorySha256", "tests"
 ) "WACK private run record report"
 Assert-ExactKeys $record.appcert @(
-  "fileVersion", "sha256", "signerSubject", "signerThumbprint"
+  "approvedFileVersion", "fileVersion", "sha256", "signerSubject", "signerThumbprint"
 ) "WACK private run record appcert"
 if (
   $record.schemaVersion -ne 2 -or
@@ -107,6 +121,16 @@ if (
   $record.package.signerThumbprint -cne ([string]$state.certificateThumbprint).ToLowerInvariant() -or
   $record.report.sha256 -cne $reportHash
 ) { throw "WACK private run record is not bound to the exact state/package/report bytes." }
+$equivalence = & "$PSScriptRoot/windows-appx-payload-equivalence.ps1" `
+  -SubmissionAppxPath $submission `
+  -QaAppxPath $package `
+  -ExpectedQaCertificateThumbprint ([string]$state.certificateThumbprint)
+if (
+  $equivalence.submissionPackageSha256 -cne [string]$state.submissionSha256 -or
+  $equivalence.qaPackageSha256 -cne [string]$state.candidateSha256 -or
+  [int]$equivalence.payloadFileCount -ne [int]$state.payloadFileCount -or
+  $equivalence.payloadTreeSha256 -cne [string]$state.payloadTreeSha256
+) { throw "WACK private record no longer shares the unsigned submission payload tree." }
 $packageSignature = Get-AuthenticodeSignature -LiteralPath $package
 if (
   $packageSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
@@ -152,15 +176,26 @@ if (
   $reportItem.LastWriteTimeUtc -gt $finishedAt.UtcDateTime.AddSeconds(2)
 ) { throw "WACK report file time is outside the bound same-run interval." }
 
-$kitPath = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\App Certification Kit\appcert.exe"
+$kitPath = [System.IO.Path]::GetFullPath(
+  (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\App Certification Kit\appcert.exe")
+)
 if (-not (Test-Path -LiteralPath $kitPath -PathType Leaf)) { throw "Current appcert.exe is missing." }
+$kitItem = Get-Item -LiteralPath $kitPath -Force
+$canonicalFileVersion = $kitItem.VersionInfo.FileVersionRaw.ToString()
 $kitSignature = Get-AuthenticodeSignature -LiteralPath $kitPath
 if (
   $record.appcert.sha256 -cne (Get-FileHash -LiteralPath $kitPath -Algorithm SHA256).Hash.ToLowerInvariant() -or
-  [string]::IsNullOrWhiteSpace([string]$record.appcert.fileVersion) -or
-  [string](Get-Item -LiteralPath $kitPath).VersionInfo.FileVersion -cne [string]$record.appcert.fileVersion -or
+  $ExpectedApprovedWackFileVersion -notmatch '^\d+(?:\.\d+){3}$' -or
+  [string]$record.appcert.approvedFileVersion -cne $ExpectedApprovedWackFileVersion -or
+  [string]$record.appcert.fileVersion -cne $ExpectedApprovedWackFileVersion -or
+  $canonicalFileVersion -cne [string]$record.appcert.fileVersion -or
+  ($kitItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
   $kitSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
   -not $kitSignature.SignerCertificate -or
+  $kitSignature.SignerCertificate.Subject -notmatch '(?i)(?:^|,\s*)O=Microsoft Corporation(?:,|$)' -or
+  -not (@($kitSignature.SignerCertificate.EnhancedKeyUsageList) | Where-Object {
+    $_.ObjectId.Value -eq "1.3.6.1.5.5.7.3.3"
+  }) -or
   $kitSignature.SignerCertificate.Subject -cne [string]$record.appcert.signerSubject -or
   $kitSignature.SignerCertificate.Thumbprint.Replace(" ", "").ToLowerInvariant() -cne [string]$record.appcert.signerThumbprint
 ) { throw "WACK private run record does not match the current trusted appcert.exe bytes/signature." }

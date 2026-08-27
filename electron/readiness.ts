@@ -11,9 +11,11 @@ export interface RendererDomProof {
 }
 
 export interface StoreUiProbe {
-  schemaVersion: 1;
+  schemaVersion: 2;
   candidateSha256: string;
+  captureStoreScreenshots: boolean;
   nonce: string;
+  screenshotRound: 0 | 2;
   version: string;
 }
 
@@ -68,14 +70,16 @@ export function parseStoreUiProbe(
   const keys = Object.keys(value).sort();
   const expectedKeys = [
     "candidateSha256",
+    "captureStoreScreenshots",
     "nonce",
     "schemaVersion",
+    "screenshotRound",
     "version"
   ];
   if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) {
     throw new Error("Store UI probe contains missing or unexpected fields.");
   }
-  if (probe.schemaVersion !== 1) {
+  if (probe.schemaVersion !== 2) {
     throw new Error("Store UI probe schema is unsupported.");
   }
   if (
@@ -94,6 +98,16 @@ export function parseStoreUiProbe(
   }
   if (probe.version !== expectedVersion) {
     throw new Error("Store UI probe version does not match the packaged app.");
+  }
+  if (
+    typeof probe.captureStoreScreenshots !== "boolean" ||
+    (probe.captureStoreScreenshots
+      ? probe.screenshotRound !== 2
+      : probe.screenshotRound !== 0)
+  ) {
+    throw new Error(
+      "Store UI screenshot request must be disabled/round 0 or enabled/round 2."
+    );
   }
 
   return probe as StoreUiProbe;

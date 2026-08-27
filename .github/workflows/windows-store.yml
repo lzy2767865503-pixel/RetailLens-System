@@ -44,6 +44,8 @@ jobs:
       RETAILLENS_CERTIFICATION_LIVE_API_CHECK_REQUIRED: ${{ vars.RETAILLENS_CERTIFICATION_LIVE_API_CHECK_REQUIRED }}
       RETAILLENS_GENERATIVE_AI_DECLARED: ${{ vars.RETAILLENS_GENERATIVE_AI_DECLARED }}
       RETAILLENS_AUTOMATIC_BACKUP_DISABLED: ${{ vars.RETAILLENS_AUTOMATIC_BACKUP_DISABLED }}
+      RETAILLENS_APPROVED_WACK_FILE_VERSION: ${{ vars.RETAILLENS_APPROVED_WACK_FILE_VERSION }}
+      RETAILLENS_PRIVATE_STORE_HANDOFF_ROOT: ${{ vars.RETAILLENS_PRIVATE_STORE_HANDOFF_ROOT }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
     steps:
@@ -64,6 +66,9 @@ jobs:
             $env:RETAILLENS_RESERVED_IDENTITY_NAME -cne $env:RETAILLENS_STORE_IDENTITY_NAME -or
             $env:RETAILLENS_RESERVED_PUBLISHER -cne $env:RETAILLENS_STORE_PUBLISHER
           ) { throw 'Protected Partner Center variables differ from the immutable production identity' }
+          if ($env:RETAILLENS_APPROVED_WACK_FILE_VERSION -notmatch '^\d+(?:\.\d+){3}$') {
+            throw 'RETAILLENS_APPROVED_WACK_FILE_VERSION must be an exact protected four-part version'
+          }
           git fetch --force origin '+refs/heads/main:refs/remotes/origin/main'
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch current remote main' }
           $head = (git rev-parse HEAD).Trim().ToLowerInvariant()
@@ -76,6 +81,10 @@ jobs:
             throw 'Run-unique Store state unexpectedly pre-exists'
           }
           "RETAILLENS_STORE_STATE_PATH=$statePath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Fail early unless the private Store handoff root is fixed NTFS with exact ACL
+        shell: pwsh
+        run: ./scripts/windows-retain-private-store-handoff.ps1 -PrivateRoot $env:RETAILLENS_PRIVATE_STORE_HANDOFF_ROOT -ValidateOnly
 
       - name: Install pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
@@ -109,7 +118,7 @@ jobs:
       - name: Build exact unsigned production-identity AppX
         run: pnpm package:store
 
-      - name: Preflight, inspect exact manifest, create one non-exportable certificate, sign once, and destroy unsigned source
+      - name: Preserve unsigned submission, create one payload-equivalent temporary-signed QA copy, and remove workspace output
         shell: pwsh
         run: |
           ./scripts/windows-prepare-store-candidate.ps1 `
@@ -118,6 +127,8 @@ jobs:
             -Publisher $env:RETAILLENS_STORE_PUBLISHER
           $state = Get-Content $env:RETAILLENS_STORE_STATE_PATH -Raw | ConvertFrom-Json
           "RETAILLENS_STORE_CANDIDATE_SHA256=$($state.candidateSha256)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETAILLENS_STORE_SUBMISSION_SHA256=$($state.submissionSha256)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETAILLENS_STORE_PAYLOAD_TREE_SHA256=$($state.payloadTreeSha256)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RETAILLENS_STORE_RUN_ROOT=$($state.runRoot)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Bind Round 1 live OpenAI capability to this exact Store commit/model/candidate
@@ -169,6 +180,7 @@ jobs:
             -Repository '${{ github.repository }}' -CommitSha '${{ github.sha }}' `
             -WorkflowRef '${{ github.workflow_ref }}' `
             -WorkflowRunId '${{ github.run_id }}' -WorkflowRunAttempt '${{ github.run_attempt }}' `
+            -ApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION `
             -ResetTimeoutSeconds 300 -TestTimeoutSeconds 3600
 
       - name: Immediately verify WACK round 1 private same-run record
@@ -181,7 +193,8 @@ jobs:
             -RunRecordPath (Join-Path $root 'WACK-private-run-record.json') `
             -ExpectedRound 1 -ExpectedRepository '${{ github.repository }}' `
             -ExpectedCommitSha '${{ github.sha }}' -ExpectedWorkflowRef '${{ github.workflow_ref }}' `
-            -ExpectedWorkflowRunId '${{ github.run_id }}' -ExpectedWorkflowRunAttempt '${{ github.run_attempt }}'
+            -ExpectedWorkflowRunId '${{ github.run_id }}' -ExpectedWorkflowRunAttempt '${{ github.run_attempt }}' `
+            -ExpectedApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION
 
       - name: Remove any WACK round 1 package/process/data residue while preserving candidate and certificate
         if: always()
@@ -243,6 +256,7 @@ jobs:
             -Repository '${{ github.repository }}' -CommitSha '${{ github.sha }}' `
             -WorkflowRef '${{ github.workflow_ref }}' `
             -WorkflowRunId '${{ github.run_id }}' -WorkflowRunAttempt '${{ github.run_attempt }}' `
+            -ApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION `
             -ResetTimeoutSeconds 300 -TestTimeoutSeconds 3600
 
       - name: Immediately verify WACK round 2 private same-run record and two-round identity
@@ -255,13 +269,18 @@ jobs:
             -RunRecordPath (Join-Path $root 'WACK-private-run-record.json') `
             -ExpectedRound 2 -ExpectedRepository '${{ github.repository }}' `
             -ExpectedCommitSha '${{ github.sha }}' -ExpectedWorkflowRef '${{ github.workflow_ref }}' `
-            -ExpectedWorkflowRunId '${{ github.run_id }}' -ExpectedWorkflowRunAttempt '${{ github.run_attempt }}'
+            -ExpectedWorkflowRunId '${{ github.run_id }}' -ExpectedWorkflowRunAttempt '${{ github.run_attempt }}' `
+            -ExpectedApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION
           $round1 = Get-Content (Join-Path $env:RETAILLENS_STORE_RUN_ROOT 'wack-round-1/WACK-private-run-record.json') -Raw | ConvertFrom-Json
           $round2 = Get-Content (Join-Path $env:RETAILLENS_STORE_RUN_ROOT 'wack-round-2/WACK-private-run-record.json') -Raw | ConvertFrom-Json
           if (
             $round1.package.sha256 -cne $round2.package.sha256 -or
             $round1.package.sha256 -cne $env:RETAILLENS_STORE_CANDIDATE_SHA256 -or
             $round1.commitSha -cne $round2.commitSha -or
+            $round1.appcert.approvedFileVersion -cne $env:RETAILLENS_APPROVED_WACK_FILE_VERSION -or
+            $round2.appcert.approvedFileVersion -cne $env:RETAILLENS_APPROVED_WACK_FILE_VERSION -or
+            $round1.appcert.fileVersion -cne $round2.appcert.fileVersion -or
+            $round1.appcert.sha256 -cne $round2.appcert.sha256 -or
             $round1.runId -ceq $round2.runId -or
             [int]$round1.round -ne 1 -or [int]$round2.round -ne 2
           ) { throw 'WACK rounds are not two distinct runs on the same commit and exact candidate bytes' }
@@ -275,7 +294,18 @@ jobs:
         shell: pwsh
         run: ./scripts/windows-store-lifecycle.ps1 -StatePath $env:RETAILLENS_STORE_STATE_PATH -Round 2
 
-      - name: Full independent cleanup including package, private key, certificate, candidate, records, and run root
+      - name: Atomically retain only the unsigned submission and its two-round lineage under the private NTFS boundary
+        shell: pwsh
+        run: |
+          ./scripts/windows-retain-private-store-handoff.ps1 `
+            -PrivateRoot $env:RETAILLENS_PRIVATE_STORE_HANDOFF_ROOT `
+            -StatePath $env:RETAILLENS_STORE_STATE_PATH `
+            -CommitSha '${{ github.sha }}' `
+            -Round1RecordPath (Join-Path $env:RETAILLENS_STORE_RUN_ROOT 'wack-round-1/WACK-private-run-record.json') `
+            -Round2RecordPath (Join-Path $env:RETAILLENS_STORE_RUN_ROOT 'wack-round-2/WACK-private-run-record.json') `
+            -ApprovedWackFileVersion $env:RETAILLENS_APPROVED_WACK_FILE_VERSION
+
+      - name: Full independent cleanup of QA package, private key, certificate, records, and run root while preserving private handoff
         if: always()
         shell: pwsh
         run: ./scripts/windows-store-cleanup.ps1 -StatePath $env:RETAILLENS_STORE_STATE_PATH -IdentityName $env:RETAILLENS_STORE_IDENTITY_NAME
@@ -290,7 +320,13 @@ jobs:
             "- Product ID: $env:RETAILLENS_STORE_PRODUCT_ID",
             "- Identity.Name: $env:RETAILLENS_STORE_IDENTITY_NAME",
             "- Publisher: $env:RETAILLENS_STORE_PUBLISHER",
+            "- Unsigned Partner Center submission SHA-256: $env:RETAILLENS_STORE_SUBMISSION_SHA256",
+            "- Temporary QA SHA-256: $env:RETAILLENS_STORE_CANDIDATE_SHA256",
+            "- Common unsigned/QA payload-tree SHA-256: $env:RETAILLENS_STORE_PAYLOAD_TREE_SHA256",
+            '- Store listing screenshots: four exact 1366 x 768 PNGs captured by the installed QA candidate from built-in demo data and retained only in the private handoff.',
+            "- Approved appcert.exe FileVersion: $env:RETAILLENS_APPROVED_WACK_FILE_VERSION",
             "- Workflow result: ${{ job.status }}",
             '- Candidate/evidence artifact upload: none',
-            '- WACK JSON records were private same-run consistency records, not cryptographic attestations, and were destroyed during cleanup.'
+            '- On success, the unsigned package and lineage receipt remain only under the pre-provisioned local fixed-NTFS exact-ACL handoff root.',
+            '- WACK JSON records were private same-run consistency records, not cryptographic attestations, and temporary copies were destroyed during cleanup.'
           ) | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

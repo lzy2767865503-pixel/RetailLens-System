@@ -16,9 +16,11 @@ const validDom = {
 };
 
 const validProbe = {
-  schemaVersion: 1 as const,
+  schemaVersion: 2 as const,
   candidateSha256: "a".repeat(64),
+  captureStoreScreenshots: false,
   nonce: "123e4567-e89b-42d3-a456-426614174000",
+  screenshotRound: 0 as const,
   version: "1.1.0"
 };
 
@@ -59,6 +61,26 @@ describe("packaged renderer readiness policy", () => {
         "1.1.0"
       )
     ).toThrow(/unexpected fields/);
+    expect(() =>
+      parseStoreUiProbe(
+        {
+          ...validProbe,
+          captureStoreScreenshots: true,
+          screenshotRound: 0
+        },
+        "1.1.0"
+      )
+    ).toThrow(/screenshot request/);
+    expect(
+      parseStoreUiProbe(
+        {
+          ...validProbe,
+          captureStoreScreenshots: true,
+          screenshotRound: 2
+        },
+        "1.1.0"
+      )
+    ).toMatchObject({ captureStoreScreenshots: true, screenshotRound: 2 });
   });
 
   it("emits author-owned evidence only after every DOM assertion passes", () => {

@@ -9,6 +9,7 @@ param(
   [Parameter(Mandatory = $true)] [string]$WorkflowRef,
   [Parameter(Mandatory = $true)] [string]$WorkflowRunId,
   [Parameter(Mandatory = $true)] [string]$WorkflowRunAttempt,
+  [Parameter(Mandatory = $true)] [string]$ApprovedWackFileVersion,
   [ValidateRange(30, 900)] [int]$ResetTimeoutSeconds = 300,
   [ValidateRange(300, 7200)] [int]$TestTimeoutSeconds = 3600
 )
@@ -36,15 +37,17 @@ $stateFile = (Resolve-Path -LiteralPath $StatePath).Path
 $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
 $expectedStateKeys = @(
   "applicationId", "candidatePath", "candidateSha256", "certificateFriendlyName",
-  "certificateThumbprint", "executable", "identityName", "publisher", "runId",
-  "productVersion", "runRoot", "schemaVersion", "unsignedSourceDestroyed", "version"
+  "certificateThumbprint", "executable", "identityName", "payloadFileCount",
+  "payloadTreeSha256", "privateHandoffRetained", "productVersion", "publisher",
+  "runId", "runRoot", "schemaVersion", "submissionPath", "submissionSha256",
+  "unsignedWorkspaceDestroyed", "version"
 ) | Sort-Object
 $actualStateKeys = @($state.PSObject.Properties.Name) | Sort-Object
 if (@(Compare-Object $expectedStateKeys $actualStateKeys -CaseSensitive).Count -ne 0) {
   throw "Store state contains missing or unexpected fields."
 }
 if (
-  $state.schemaVersion -ne 1 -or
+  $state.schemaVersion -ne 2 -or
   $state.identityName -cne "LAIZEYU.RetailDecisionStudiobyLAIZEYU" -or
   $state.publisher -cne "CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8" -or
   $state.applicationId -cne "RetailDecisionStudio" -or
@@ -53,23 +56,33 @@ if (
   $state.productVersion -notmatch '^\d+\.\d+\.\d+$' -or
   $state.version -cne "$($state.productVersion).0" -or
   $state.candidateSha256 -notmatch '^[0-9a-f]{64}$' -or
+  $state.submissionSha256 -notmatch '^[0-9a-f]{64}$' -or
+  [int]$state.payloadFileCount -lt 4 -or
+  $state.payloadTreeSha256 -notmatch '^[0-9a-f]{64}$' -or
   $state.certificateThumbprint -notmatch '^[0-9a-f]{40}$' -or
-  $state.unsignedSourceDestroyed -ne $true
+  $state.unsignedWorkspaceDestroyed -ne $true -or
+  $state.privateHandoffRetained -ne $false
 ) { throw "Store state violates the immutable candidate identity policy." }
 
 $resolvedPackage = (Resolve-Path -LiteralPath ([string]$state.candidatePath)).Path
+$resolvedSubmission = (Resolve-Path -LiteralPath ([string]$state.submissionPath)).Path
 $resolvedRunRoot = (Resolve-Path -LiteralPath ([string]$state.runRoot)).Path
 $resolvedReport = [System.IO.Path]::GetFullPath($ReportPath)
 $resolvedStatus = [System.IO.Path]::GetFullPath($StatusPath)
 $resolvedRecord = [System.IO.Path]::GetFullPath($RunRecordPath)
 $runRootItem = Get-Item -LiteralPath $resolvedRunRoot -Force
 $packageItem = Get-Item -LiteralPath $resolvedPackage -Force
+$submissionItem = Get-Item -LiteralPath $resolvedSubmission -Force
 if (
   -not $runRootItem.PSIsContainer -or
   ($runRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
   ($packageItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+  ($submissionItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
   -not (Test-RetailLensPathWithin -CandidatePath $resolvedPackage -RootPath $resolvedRunRoot) -or
-  (Split-Path -Leaf $resolvedPackage) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64.appx" -or
+  (Split-Path -Leaf $resolvedPackage) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64-qa-signed.appx" -or
+  -not (Test-RetailLensPathWithin -CandidatePath $resolvedSubmission -RootPath $resolvedRunRoot) -or
+  (Split-Path -Leaf $resolvedSubmission) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64.appx" -or
+  [string]::Equals($resolvedPackage, $resolvedSubmission, [System.StringComparison]::OrdinalIgnoreCase) -or
   @(@($resolvedReport, $resolvedStatus, $resolvedRecord) | Sort-Object -Unique).Count -ne 3
 ) { throw "WACK run root/package/output boundary policy failed." }
 foreach ($outputPath in @($resolvedReport, $resolvedStatus, $resolvedRecord)) {
@@ -81,6 +94,16 @@ $packageSha256 = (Get-FileHash -LiteralPath $resolvedPackage -Algorithm SHA256).
 if ($packageSha256 -cne [string]$state.candidateSha256) {
   throw "The exact signed Store candidate changed before WACK round $Round."
 }
+$equivalence = & "$PSScriptRoot/windows-appx-payload-equivalence.ps1" `
+  -SubmissionAppxPath $resolvedSubmission `
+  -QaAppxPath $resolvedPackage `
+  -ExpectedQaCertificateThumbprint ([string]$state.certificateThumbprint)
+if (
+  $equivalence.submissionPackageSha256 -cne [string]$state.submissionSha256 -or
+  $equivalence.qaPackageSha256 -cne [string]$state.candidateSha256 -or
+  [int]$equivalence.payloadFileCount -ne [int]$state.payloadFileCount -or
+  $equivalence.payloadTreeSha256 -cne [string]$state.payloadTreeSha256
+) { throw "WACK candidate no longer matches the unsigned Partner Center submission payload tree." }
 $expectedThumbprint = ([string]$state.certificateThumbprint).Replace(" ", "").ToUpperInvariant()
 $packageSignature = Get-AuthenticodeSignature -LiteralPath $resolvedPackage
 if (
@@ -95,10 +118,20 @@ foreach ($path in @($resolvedReport, $resolvedStatus, $resolvedRecord)) {
   if (Test-Path -LiteralPath $path) { throw "WACK round output must not pre-exist: $path" }
 }
 
-$kitPath = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\App Certification Kit\appcert.exe"
+$kitPath = [System.IO.Path]::GetFullPath(
+  (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\App Certification Kit\appcert.exe")
+)
 if (-not (Test-Path -LiteralPath $kitPath -PathType Leaf)) {
   throw "Windows App Certification Kit is missing."
 }
+$kitItem = Get-Item -LiteralPath $kitPath -Force
+$canonicalFileVersion = $kitItem.VersionInfo.FileVersionRaw.ToString()
+if (
+  [string]::IsNullOrWhiteSpace($ApprovedWackFileVersion) -or
+  $ApprovedWackFileVersion -notmatch '^\d+(?:\.\d+){3}$' -or
+  $canonicalFileVersion -cne $ApprovedWackFileVersion -or
+  ($kitItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+) { throw "Canonical appcert.exe does not match RETAILLENS_APPROVED_WACK_FILE_VERSION." }
 $kitSignature = Get-AuthenticodeSignature -LiteralPath $kitPath
 if (
   $kitSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
@@ -238,7 +271,8 @@ try {
       tests = @($reportPolicy.Tests)
     }
     appcert = [ordered]@{
-      fileVersion = [string](Get-Item -LiteralPath $kitPath).VersionInfo.FileVersion
+      approvedFileVersion = $ApprovedWackFileVersion
+      fileVersion = $canonicalFileVersion
       sha256 = (Get-FileHash -LiteralPath $kitPath -Algorithm SHA256).Hash.ToLowerInvariant()
       signerSubject = $kitSignature.SignerCertificate.Subject
       signerThumbprint = $kitSignature.SignerCertificate.Thumbprint.ToLowerInvariant()

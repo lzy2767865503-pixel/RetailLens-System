@@ -36,12 +36,14 @@ if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
     $candidateState = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json -ErrorAction Stop
     $expectedStateKeys = @(
       "applicationId", "candidatePath", "candidateSha256", "certificateFriendlyName",
-      "certificateThumbprint", "executable", "identityName", "productVersion", "publisher",
-      "runId", "runRoot", "schemaVersion", "unsignedSourceDestroyed", "version"
+      "certificateThumbprint", "executable", "identityName", "payloadFileCount",
+      "payloadTreeSha256", "privateHandoffRetained", "productVersion", "publisher",
+      "runId", "runRoot", "schemaVersion", "submissionPath", "submissionSha256",
+      "unsignedWorkspaceDestroyed", "version"
     ) | Sort-Object
     if (
       @(Compare-Object $expectedStateKeys @($candidateState.PSObject.Properties.Name | Sort-Object) -CaseSensitive).Count -ne 0 -or
-      $candidateState.schemaVersion -ne 1 -or
+      $candidateState.schemaVersion -ne 2 -or
       $candidateState.identityName -cne $IdentityName -or
       $candidateState.publisher -cne "CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8" -or
       $candidateState.applicationId -cne "RetailDecisionStudio" -or
@@ -51,18 +53,28 @@ if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
       $candidateState.runId -notmatch '^[0-9a-f]{32}$' -or
       $candidateState.certificateFriendlyName -cne "RetailLens CI sideload $($candidateState.runId)" -or
       ([string]$candidateState.certificateThumbprint -and [string]$candidateState.certificateThumbprint -notmatch '^[0-9a-f]{40}$') -or
-      ([string]$candidateState.candidateSha256 -and [string]$candidateState.candidateSha256 -notmatch '^[0-9a-f]{64}$')
+      ([string]$candidateState.candidateSha256 -and [string]$candidateState.candidateSha256 -notmatch '^[0-9a-f]{64}$') -or
+      ([string]$candidateState.submissionSha256 -and [string]$candidateState.submissionSha256 -notmatch '^[0-9a-f]{64}$') -or
+      ([string]$candidateState.payloadTreeSha256 -and [string]$candidateState.payloadTreeSha256 -notmatch '^[0-9a-f]{64}$') -or
+      [int]$candidateState.payloadFileCount -lt 0 -or
+      $candidateState.unsignedWorkspaceDestroyed -isnot [bool] -or
+      $candidateState.privateHandoffRetained -isnot [bool]
     ) { throw "Store cleanup state identity/schema is invalid." }
     $candidateRunRoot = [System.IO.Path]::GetFullPath([string]$candidateState.runRoot)
     $candidatePath = [System.IO.Path]::GetFullPath([string]$candidateState.candidatePath)
-    $expectedCandidatePath = Join-Path $candidateRunRoot "RetailDecisionStudioByLAIZEYU-$($candidateState.productVersion)-x64.appx"
+    $submissionPath = [System.IO.Path]::GetFullPath([string]$candidateState.submissionPath)
+    $expectedCandidatePath = Join-Path $candidateRunRoot "RetailDecisionStudioByLAIZEYU-$($candidateState.productVersion)-x64-qa-signed.appx"
+    $expectedSubmissionPath = Join-Path $candidateRunRoot "RetailDecisionStudioByLAIZEYU-$($candidateState.productVersion)-x64.appx"
     if (
       -not (Test-RetailLensPathWithin -CandidatePath $candidateRunRoot -RootPath $temporaryRoot) -or
       (Split-Path -Leaf $candidateRunRoot) -cne "retaillens-store-$($candidateState.runId)" -or
-      $candidatePath -cne [System.IO.Path]::GetFullPath($expectedCandidatePath)
+      $candidatePath -cne [System.IO.Path]::GetFullPath($expectedCandidatePath) -or
+      $submissionPath -cne [System.IO.Path]::GetFullPath($expectedSubmissionPath) -or
+      [string]::Equals($candidatePath, $submissionPath, [System.StringComparison]::OrdinalIgnoreCase)
     ) { throw "Store cleanup state path boundary is invalid." }
     $candidateState.runRoot = $candidateRunRoot
     $candidateState.candidatePath = $candidatePath
+    $candidateState.submissionPath = $submissionPath
     $script:state = $candidateState
   }
 }
@@ -187,6 +199,8 @@ if (-not $RuntimeOnly) {
     if ($state -and (Test-Path -LiteralPath $StatePath)) { Remove-Item -LiteralPath $StatePath -Force }
     $temporaryStatePath = "$StatePath.tmp"
     if (Test-Path -LiteralPath $temporaryStatePath) { Remove-Item -LiteralPath $temporaryStatePath -Force }
+    $retentionStatePath = "$StatePath.retain.tmp"
+    if (Test-Path -LiteralPath $retentionStatePath) { Remove-Item -LiteralPath $retentionStatePath -Force }
   }
 }
 

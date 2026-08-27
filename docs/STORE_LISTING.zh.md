@@ -1,6 +1,6 @@
 # Microsoft Store 商店文案 — 中文（草案）
 
-状态：文案可用草案；Partner Center 产品身份已预留（Store ID `9NVNLQWQBKHD`），年龄分级、市场范围、截图、认证结果和公开链接仍未核实。
+状态：文案可用草案；Partner Center 产品身份已预留（Store ID `9NVNLQWQBKHD`）。Windows 工作流要求由同一已安装 QA 候选版本生成并通过隐私门禁的 4 张 1366 x 768 截图，但在原生 Windows 运行通过前不声称已有截图；年龄分级、市场范围、认证结果和公开链接也仍未核实。
 
 ## 产品名称
 

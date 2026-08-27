@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 
 $state = Get-Content -LiteralPath (Resolve-Path -LiteralPath $StatePath).Path -Raw | ConvertFrom-Json
 if (
-  $state.schemaVersion -ne 1 -or
+  $state.schemaVersion -ne 2 -or
   $state.identityName -cne "LAIZEYU.RetailDecisionStudiobyLAIZEYU" -or
   $state.publisher -cne "CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8" -or
   $state.applicationId -cne "RetailDecisionStudio" -or
@@ -19,10 +19,15 @@ if (
   $state.productVersion -notmatch '^\d+\.\d+\.\d+$' -or
   $state.version -cne "$($state.productVersion).0" -or
   $state.candidateSha256 -notmatch '^[0-9a-f]{64}$' -or
+  $state.submissionSha256 -notmatch '^[0-9a-f]{64}$' -or
+  [int]$state.payloadFileCount -lt 4 -or
+  $state.payloadTreeSha256 -notmatch '^[0-9a-f]{64}$' -or
   $state.certificateThumbprint -notmatch '^[0-9a-f]{40}$' -or
-  $state.unsignedSourceDestroyed -ne $true
+  $state.unsignedWorkspaceDestroyed -ne $true -or
+  $state.privateHandoffRetained -ne $false
 ) { throw "Store lifecycle state violates the immutable production identity policy." }
 $candidate = (Resolve-Path -LiteralPath ([string]$state.candidatePath)).Path
+$submission = (Resolve-Path -LiteralPath ([string]$state.submissionPath)).Path
 $runRoot = (Resolve-Path -LiteralPath ([string]$state.runRoot)).Path
 $runRootItem = Get-Item -LiteralPath $runRoot -Force
 $candidateItem = Get-Item -LiteralPath $candidate -Force
@@ -31,12 +36,24 @@ if (
   ($runRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
   ($candidateItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
   -not (Test-RetailLensPathWithin -CandidatePath $candidate -RootPath $runRoot) -or
-  (Split-Path -Leaf $candidate) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64.appx"
+  (Split-Path -Leaf $candidate) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64-qa-signed.appx" -or
+  -not (Test-RetailLensPathWithin -CandidatePath $submission -RootPath $runRoot) -or
+  (Split-Path -Leaf $submission) -cne "RetailDecisionStudioByLAIZEYU-$($state.productVersion)-x64.appx"
 ) { throw "Store lifecycle candidate path escaped the exact run-owned package policy." }
 $candidateHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($candidateHash -cne [string]$state.candidateSha256) {
   throw "Store lifecycle round $Round candidate hash changed before installation."
 }
+$equivalence = & "$PSScriptRoot/windows-appx-payload-equivalence.ps1" `
+  -SubmissionAppxPath $submission `
+  -QaAppxPath $candidate `
+  -ExpectedQaCertificateThumbprint ([string]$state.certificateThumbprint)
+if (
+  $equivalence.submissionPackageSha256 -cne [string]$state.submissionSha256 -or
+  $equivalence.qaPackageSha256 -cne [string]$state.candidateSha256 -or
+  [int]$equivalence.payloadFileCount -ne [int]$state.payloadFileCount -or
+  $equivalence.payloadTreeSha256 -cne [string]$state.payloadTreeSha256
+) { throw "Store lifecycle QA copy differs from the unsigned Partner Center payload tree." }
 $signature = Get-AuthenticodeSignature -LiteralPath $candidate
 if (
   $signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
@@ -103,9 +120,11 @@ try {
   $nonce = [Guid]::NewGuid().ToString("D").ToLowerInvariant()
   $probeCreatedAt = [DateTimeOffset]::UtcNow
   [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     candidateSha256 = $candidateHash
+    captureStoreScreenshots = ($Round -eq 2)
     nonce = $nonce
+    screenshotRound = if ($Round -eq 2) { 2 } else { 0 }
     version = [string]$state.productVersion
   } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $proofDirectory "probe.json") -Encoding utf8
   $readyPath = Join-Path $proofDirectory "ui_ready.json"
@@ -158,8 +177,8 @@ try {
     )
   ) { throw "Store lifecycle round $Round listener PID is not the literal installed executable." }
   $expectedEvidenceKeys = @(
-    "author", "candidateSha256", "dom", "nonce", "processId",
-    "product", "readyAt", "schemaVersion", "version"
+    "author", "candidateSha256", "captureStoreScreenshots", "dom", "nonce", "processId",
+    "product", "readyAt", "schemaVersion", "screenshotRound", "version"
   ) | Sort-Object
   if (@(Compare-Object $expectedEvidenceKeys @($ready.PSObject.Properties.Name | Sort-Object) -CaseSensitive).Count -ne 0) {
     throw "Store lifecycle round $Round readiness evidence schema is not exact."
@@ -175,12 +194,14 @@ try {
     $health.service -cne "RetailLens API" -or
     [long]$health.processId -ne $listenerPid -or
     "zh" -notin @($health.languages) -or "en" -notin @($health.languages) -or
-    $ready.schemaVersion -ne 1 -or
+    $ready.schemaVersion -ne 2 -or
     $ready.product -cne "Retail Decision Studio by LAI ZEYU" -or
     $ready.author -cne "LAI ZEYU（来泽宇）" -or
     $ready.version -cne [string]$state.productVersion -or
     $ready.candidateSha256 -cne $candidateHash -or
+    $ready.captureStoreScreenshots -ne ($Round -eq 2) -or
     $ready.nonce -cne $nonce -or
+    [int]$ready.screenshotRound -ne $(if ($Round -eq 2) { 2 } else { 0 }) -or
     [long]$ready.processId -ne $listenerPid -or
     $ready.processId -notin @($installedProcesses.ProcessId) -or
     $ready.dom.titleMatches -ne $true -or
@@ -195,6 +216,19 @@ try {
   }
   if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant() -cne $candidateHash) {
     throw "Store lifecycle round $Round changed the exact signed candidate."
+  }
+  $captureSource = Join-Path $proofDirectory "store-listing-screenshots"
+  if ($Round -eq 2) {
+    $capture = & "$PSScriptRoot/windows-collect-store-screenshots.ps1" `
+      -StatePath $StatePath `
+      -ProofDirectory $proofDirectory `
+      -ExpectedNonce $nonce `
+      -Round 2
+    if ([int]$capture.screenshotCount -ne 4 -or $capture.manifestSha256 -notmatch '^[0-9a-f]{64}$') {
+      throw "Store lifecycle round 2 did not retain four exact 1366 x 768 packaged-app screenshots."
+    }
+  } elseif (Test-Path -LiteralPath $captureSource) {
+    throw "Store lifecycle round 1 unexpectedly produced screenshot state."
   }
 } catch {
   $primaryError = $_

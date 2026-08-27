@@ -97,17 +97,22 @@ if (-not $makeAppx -or -not $signTool) { throw "Windows SDK x64 MakeAppx/SignToo
 $runId = [Guid]::NewGuid().ToString("N")
 $runRoot = Join-Path $runnerTemp "retaillens-store-$runId"
 $manifestRoot = Join-Path $runRoot "manifest"
-$candidatePath = Join-Path $runRoot $expectedAppxName
+$submissionPath = Join-Path $runRoot $expectedAppxName
+$candidatePath = Join-Path $runRoot "RetailDecisionStudioByLAIZEYU-$packageVersion-x64-qa-signed.appx"
 $cerPath = Join-Path $runRoot "sideload-test.cer"
 $friendlyName = "RetailLens CI sideload $runId"
 New-Item -ItemType Directory -Path $manifestRoot | Out-Null
 
 $state = [ordered]@{
-  schemaVersion = 1
+  schemaVersion = 2
   runId = $runId
   runRoot = $runRoot
   candidatePath = $candidatePath
   candidateSha256 = ""
+  submissionPath = $submissionPath
+  submissionSha256 = ""
+  payloadFileCount = 0
+  payloadTreeSha256 = ""
   certificateThumbprint = ""
   certificateFriendlyName = $friendlyName
   identityName = $IdentityName
@@ -116,7 +121,8 @@ $state = [ordered]@{
   productVersion = $packageVersion
   applicationId = $expectedApplicationId
   executable = $expectedExecutable
-  unsignedSourceDestroyed = $false
+  unsignedWorkspaceDestroyed = $false
+  privateHandoffRetained = $false
 }
 function Save-State {
   $temporaryStatePath = "$resolvedStatePath.tmp"
@@ -132,9 +138,18 @@ function Save-State {
 }
 Save-State
 
+Copy-Item -LiteralPath $unsignedAppx.FullName -Destination $submissionPath
+$submissionSignature = Get-AuthenticodeSignature -LiteralPath $submissionPath
+if (
+  $submissionSignature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned -or
+  $submissionSignature.SignerCertificate
+) { throw "Run-owned Partner Center submission copy must remain provably unsigned." }
+$state.submissionSha256 = (Get-FileHash -LiteralPath $submissionPath -Algorithm SHA256).Hash.ToLowerInvariant()
+Save-State
+
 Invoke-RetailLensBoundedProcess `
   -FilePath $makeAppx.FullName `
-  -ArgumentList @("unpack", "/p", ('"' + $unsignedAppx.FullName + '"'), "/d", ('"' + $manifestRoot + '"')) `
+  -ArgumentList @("unpack", "/p", ('"' + $submissionPath + '"'), "/d", ('"' + $manifestRoot + '"')) `
   -TimeoutSeconds 180 -Context "Store AppX manifest inspection" | Out-Null
 [xml]$manifest = Get-Content -LiteralPath (Join-Path $manifestRoot "AppxManifest.xml") -Raw
 $namespaces = [System.Xml.XmlNamespaceManager]::new($manifest.NameTable)
@@ -202,7 +217,7 @@ $state.certificateThumbprint = $certificate.Thumbprint.ToLowerInvariant()
 Save-State
 Export-Certificate -Cert $certificate -FilePath $cerPath | Out-Null
 Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\TrustedPeople" | Out-Null
-Copy-Item -LiteralPath $unsignedAppx.FullName -Destination $candidatePath
+Copy-Item -LiteralPath $submissionPath -Destination $candidatePath
 Invoke-RetailLensBoundedProcess `
   -FilePath $signTool.FullName `
   -ArgumentList @("sign", "/sha1", $certificate.Thumbprint, "/fd", "SHA256", ('"' + $candidatePath + '"')) `
@@ -214,7 +229,19 @@ if (
   $signature.SignerCertificate.Subject -cne $productionPublisher -or
   $signature.SignerCertificate.Thumbprint -cne $certificate.Thumbprint
 ) { throw "Prepared Store candidate signature is not exact and trusted." }
-$state.candidateSha256 = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$equivalence = & "$PSScriptRoot/windows-appx-payload-equivalence.ps1" `
+  -SubmissionAppxPath $submissionPath `
+  -QaAppxPath $candidatePath `
+  -ExpectedQaCertificateThumbprint $certificate.Thumbprint
+if (
+  $equivalence.submissionPackageSha256 -cne $state.submissionSha256 -or
+  $equivalence.qaPackageSha256 -notmatch '^[0-9a-f]{64}$' -or
+  [int]$equivalence.payloadFileCount -lt 4 -or
+  $equivalence.payloadTreeSha256 -notmatch '^[0-9a-f]{64}$'
+) { throw "Unsigned submission and temporary-signed QA payload lineage is invalid." }
+$state.candidateSha256 = $equivalence.qaPackageSha256
+$state.payloadFileCount = [int]$equivalence.payloadFileCount
+$state.payloadTreeSha256 = $equivalence.payloadTreeSha256
 Save-State
 
 $workspaceItem = Get-Item -LiteralPath $workspaceCandidateRoot -Force
@@ -226,6 +253,6 @@ if (
 ) { throw "Unsigned Store source root is not a regular reparse-point-free directory." }
 Remove-Item -LiteralPath $workspaceCandidateRoot -Recurse -Force
 if (Test-Path -LiteralPath $workspaceCandidateRoot) { throw "Unsigned Store source remained in the workspace." }
-$state.unsignedSourceDestroyed = $true
+$state.unsignedWorkspaceDestroyed = $true
 Save-State
-Write-Host "Prepared one exact temporary-signed Store candidate at $candidatePath and destroyed the unsigned workspace source."
+Write-Host "Prepared one unsigned Partner Center submission plus one payload-equivalent temporary-signed QA copy, then removed the workspace build root."
