@@ -23,6 +23,11 @@ $forbiddenIdentities = @(
   @{ SimpleName = "LAI ZEYU"; Subject = "CN=LAI ZEYU, OU=Microsoft Corporation" },
   @{ SimpleName = "LAI ZEYU（来泽宇）"; Subject = "CN=LAI ZEYU（来泽宇）" },
   @{ SimpleName = "lai zeyu"; Subject = "CN=lai zeyu" },
+  @{ SimpleName = "Lai Zeyu"; Subject = "CN=LAI ZEYU" },
+  @{ SimpleName = "LAI ZEYU"; Subject = "cn=LAI ZEYU" },
+  @{ SimpleName = "LAI ZEYU"; Subject = "CN=LAI ZEYU, o=LAI ZEYU" },
+  @{ SimpleName = "LAI ZEYU"; Subject = "CN=LAI ZEYU, ou=LAI ZEYU" },
+  @{ SimpleName = "LAI ZEYU"; Subject = "CN=LAI ZEYU, o=SignPath Foundation" },
   @{ SimpleName = "LAI ZEYU "; Subject = "CN=LAI ZEYU " },
   @{ SimpleName = "LAI ZEYU"; Subject = "CN=LAI ZEYU " },
   @{ SimpleName = "LAI ZEYU"; Subject = "CN=LAI ZEYU, O=LAI ZEYU " }

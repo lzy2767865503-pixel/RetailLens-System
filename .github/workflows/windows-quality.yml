@@ -51,6 +51,7 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/windows-signer-policy.test.ps1
+          ./scripts/windows-no-checkout-signer-policy.test.ps1
           ./scripts/windows-file-policy.test.ps1
           ./scripts/windows-wack-policy.test.ps1
           ./scripts/windows-workflow-powershell-ast.test.ps1
@@ -107,6 +108,7 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/windows-signer-policy.test.ps1
+          ./scripts/windows-no-checkout-signer-policy.test.ps1
           ./scripts/windows-file-policy.test.ps1
           ./scripts/windows-wack-policy.test.ps1
           ./scripts/windows-workflow-powershell-ast.test.ps1

@@ -183,6 +183,20 @@ describe("fail-closed Windows workflow source policy", () => {
       verifierJob.indexOf("$recordPath = Join-Path")
     );
 
+    for (const noCheckoutJob of [signJob, verifierJob, publisherJob]) {
+      expect(noCheckoutJob).toContain("function Assert-RetailLensNoCheckoutSignerIdentity");
+      expect(noCheckoutJob).toContain("[StringComparer]::Ordinal");
+      expect(noCheckoutJob).toContain("exact CN/O/OU");
+      expect(noCheckoutJob).not.toContain("$simpleName -notin @('LAI ZEYU', '来泽宇')");
+      expect(noCheckoutJob).not.toContain("signerSimpleName -notin @('LAI ZEYU', '来泽宇')");
+    }
+    expect(signJob.match(/function Assert-RetailLensNoCheckoutSignerIdentity/g)).toHaveLength(2);
+    expect(verifierJob.match(/function Assert-RetailLensNoCheckoutSignerIdentity/g)).toHaveLength(1);
+    expect(publisherJob.match(/function Assert-RetailLensNoCheckoutSignerIdentity/g)).toHaveLength(1);
+    expect(signJob).toContain("no-checkout signer evidence");
+    expect(verifierJob).toContain("signer-to-verifier handoff Subject");
+    expect(publisherJob).toContain("verifier-to-publisher handoff Subject");
+
     expect(signJob).not.toContain("actions/checkout");
     expect(signJob).toContain("permissions: {}");
     expect(signJob).toContain("no-checkout");
@@ -339,6 +353,8 @@ describe("fail-closed Windows workflow source policy", () => {
     const builder = read("electron-builder.config.cjs");
     const verifier = read("scripts/windows-verify-authenticode.ps1");
     const workflow = read(".github/workflows/windows-github-release.yml");
+    const signerPolicy = read("scripts/windows-signer-policy.ps1");
+    const signerPolicyTest = read("scripts/windows-signer-policy.test.ps1");
     expect(builder).toContain('signExts: [".exe", ".dll", ".node"]');
     expect(verifier).toContain("Get-RetailLensPortableExecutable");
     expect(verifier).toContain("InspectEmbeddedPayload");
@@ -349,7 +365,13 @@ describe("fail-closed Windows workflow source policy", () => {
     expect(verifier).toContain("X509RevocationMode]::Online");
     expect(verifier).toContain("exactly one Authenticode signature index");
     expect(workflow).toContain("$stream.ReadByte() -eq 0x4D");
-    expect(workflow).toContain("signerSimpleName -notin @('LAI ZEYU', '来泽宇')");
+    expect(workflow).not.toContain("signerSimpleName -notin @('LAI ZEYU', '来泽宇')");
+    expect(workflow).not.toContain("$simpleName -notin @('LAI ZEYU', '来泽宇')");
+    expect(signerPolicy).toContain("[System.StringComparison]::Ordinal");
+    expect(signerPolicy).toContain("RegexOptions]::IgnoreCase");
+    expect(signerPolicy).toContain("exact CN/O/OU casing");
+    expect(signerPolicyTest).toContain('Subject = "cn=LAI ZEYU"');
+    expect(signerPolicyTest).toContain('Subject = "CN=LAI ZEYU, o=SignPath Foundation"');
     expect(workflow).toContain("lifecycleRounds -ne 2");
   });
 

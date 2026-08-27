@@ -352,6 +352,51 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
+          function Assert-RetailLensNoCheckoutSignerIdentity {
+            param(
+              [AllowEmptyString()] [string]$SimpleName = '',
+              [Parameter(Mandatory = $true)] [string]$Subject,
+              [Parameter(Mandatory = $true)] [string]$Context,
+              [switch]$SubjectOnly
+            )
+            $allowedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            [void]$allowedNames.Add('LAI ZEYU')
+            [void]$allowedNames.Add('来泽宇')
+            if (-not $SubjectOnly -and -not $allowedNames.Contains($SimpleName)) {
+              throw "Signer SimpleName is not exact author identity for ${Context}: $SimpleName"
+            }
+            $attributes = [regex]::Matches(
+              $Subject,
+              '(?:^|[,;+]\s*)(CN|OU|O)=([^,;+]+)',
+              [Text.RegularExpressions.RegexOptions]::CultureInvariant -bor
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            foreach ($attribute in $attributes) {
+              $name = $attribute.Groups[1].Value
+              if (
+                -not [string]::Equals($name, 'CN', [StringComparison]::Ordinal) -and
+                -not [string]::Equals($name, 'O', [StringComparison]::Ordinal) -and
+                -not [string]::Equals($name, 'OU', [StringComparison]::Ordinal)
+              ) { throw "Signer Subject identity attribute casing is not exact CN/O/OU for ${Context}: $name" }
+            }
+            $commonNames = @($attributes | Where-Object {
+              [string]::Equals($_.Groups[1].Value, 'CN', [StringComparison]::Ordinal)
+            })
+            if ($commonNames.Count -ne 1) { throw "Signer Subject must contain exactly one explicit CN for $Context." }
+            foreach ($attribute in $attributes) {
+              $value = $attribute.Groups[2].Value
+              if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+                $value = $value.Substring(1, $value.Length - 2)
+              }
+              if (-not $allowedNames.Contains($value)) {
+                throw "Signer Subject CN/O/OU is not exact author identity for ${Context}: $value"
+              }
+            }
+          }
+          Assert-RetailLensNoCheckoutSignerIdentity `
+            -Subject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -Context 'configured no-checkout signer Subject' `
+            -SubjectOnly
           foreach ($forbidden in @(
             'ESIGNER_CKA_USERNAME', 'ESIGNER_CKA_PASSWORD', 'ESIGNER_CKA_TOTP_SECRET',
             'SSL_ESIGNER_USERNAME', 'SSL_ESIGNER_PASSWORD', 'SSL_ESIGNER_TOTP_SECRET',
@@ -623,6 +668,51 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
+          function Assert-RetailLensNoCheckoutSignerIdentity {
+            param(
+              [AllowEmptyString()] [string]$SimpleName = '',
+              [Parameter(Mandatory = $true)] [string]$Subject,
+              [Parameter(Mandatory = $true)] [string]$Context,
+              [switch]$SubjectOnly
+            )
+            $allowedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            [void]$allowedNames.Add('LAI ZEYU')
+            [void]$allowedNames.Add('来泽宇')
+            if (-not $SubjectOnly -and -not $allowedNames.Contains($SimpleName)) {
+              throw "Signer SimpleName is not exact author identity for ${Context}: $SimpleName"
+            }
+            $attributes = [regex]::Matches(
+              $Subject,
+              '(?:^|[,;+]\s*)(CN|OU|O)=([^,;+]+)',
+              [Text.RegularExpressions.RegexOptions]::CultureInvariant -bor
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            foreach ($attribute in $attributes) {
+              $name = $attribute.Groups[1].Value
+              if (
+                -not [string]::Equals($name, 'CN', [StringComparison]::Ordinal) -and
+                -not [string]::Equals($name, 'O', [StringComparison]::Ordinal) -and
+                -not [string]::Equals($name, 'OU', [StringComparison]::Ordinal)
+              ) { throw "Signer Subject identity attribute casing is not exact CN/O/OU for ${Context}: $name" }
+            }
+            $commonNames = @($attributes | Where-Object {
+              [string]::Equals($_.Groups[1].Value, 'CN', [StringComparison]::Ordinal)
+            })
+            if ($commonNames.Count -ne 1) { throw "Signer Subject must contain exactly one explicit CN for $Context." }
+            foreach ($attribute in $attributes) {
+              $value = $attribute.Groups[2].Value
+              if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+                $value = $value.Substring(1, $value.Length - 2)
+              }
+              if (-not $allowedNames.Contains($value)) {
+                throw "Signer Subject CN/O/OU is not exact author identity for ${Context}: $value"
+              }
+            }
+          }
+          Assert-RetailLensNoCheckoutSignerIdentity `
+            -Subject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -Context 'configured signer Subject at output verification' `
+            -SubjectOnly
           $version = $env:RELEASE_TAG.Substring(1)
           $output = Join-Path $env:RETAILLENS_ISOLATED_SIGNING_ROOT 'output'
           $archiveName = "RetailDecisionStudioByLAIZEYU-$version-x64-portable-directory.zip"
@@ -652,6 +742,10 @@ jobs:
           $evidencePath = Join-Path $output $evidenceName
           $signingEvidenceSha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
           $evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
+          Assert-RetailLensNoCheckoutSignerIdentity `
+            -SimpleName ([string]$evidence.signerSimpleName) `
+            -Subject ([string]$evidence.signerSubject) `
+            -Context 'no-checkout signer evidence'
           $evidenceKeys = @($evidence.PSObject.Properties.Name | Sort-Object)
           $expectedEvidenceKeys = @(
             'allPortableExecutablesSigned', 'appDataRemoved', 'certificateRepresentationsRemoved',
@@ -679,7 +773,6 @@ jobs:
             [int]$evidence.candidateExecutionCount -ne 0 -or
             [string]$evidence.signerSubject -cne $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT -or
             [string]$evidence.signerThumbprint -ine $env:RETAILLENS_WINDOWS_SIGNER_THUMBPRINT -or
-            [string]$evidence.signerSimpleName -notin @('LAI ZEYU', '来泽宇') -or
             [string]$evidence.timestampUrl -cne 'http://ts.ssl.com' -or
             [int]$evidence.ckaStateSchemaVersion -ne 3 -or
             [string]$evidence.ckaArchiveSha256 -cne $env:RETAILLENS_ESIGNER_CKA_ARCHIVE_SHA256 -or
@@ -735,11 +828,14 @@ jobs:
               $simpleName = $signature.SignerCertificate.GetNameInfo(
                 [Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false
               )
+              Assert-RetailLensNoCheckoutSignerIdentity `
+                -SimpleName $simpleName `
+                -Subject $signature.SignerCertificate.Subject `
+                -Context "no-checkout signer archive PE $($pe.Name)"
               if (
                 -not $signature.TimeStamperCertificate -or
                 $signature.SignerCertificate.Thumbprint -ine $env:RETAILLENS_WINDOWS_SIGNER_THUMBPRINT -or
                 $signature.SignerCertificate.Subject -cne $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT -or
-                $simpleName -notin @('LAI ZEYU', '来泽宇') -or
                 -not (@($signature.TimeStamperCertificate.EnhancedKeyUsageList) | Where-Object { $_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.8' })
               ) { throw "Signed archive PE identity/timestamp is invalid: $($pe.Name)" }
             }
@@ -989,6 +1085,51 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
+          function Assert-RetailLensNoCheckoutSignerIdentity {
+            param(
+              [AllowEmptyString()] [string]$SimpleName = '',
+              [Parameter(Mandatory = $true)] [string]$Subject,
+              [Parameter(Mandatory = $true)] [string]$Context,
+              [switch]$SubjectOnly
+            )
+            $allowedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            [void]$allowedNames.Add('LAI ZEYU')
+            [void]$allowedNames.Add('来泽宇')
+            if (-not $SubjectOnly -and -not $allowedNames.Contains($SimpleName)) {
+              throw "Signer SimpleName is not exact author identity for ${Context}: $SimpleName"
+            }
+            $attributes = [regex]::Matches(
+              $Subject,
+              '(?:^|[,;+]\s*)(CN|OU|O)=([^,;+]+)',
+              [Text.RegularExpressions.RegexOptions]::CultureInvariant -bor
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            foreach ($attribute in $attributes) {
+              $name = $attribute.Groups[1].Value
+              if (
+                -not [string]::Equals($name, 'CN', [StringComparison]::Ordinal) -and
+                -not [string]::Equals($name, 'O', [StringComparison]::Ordinal) -and
+                -not [string]::Equals($name, 'OU', [StringComparison]::Ordinal)
+              ) { throw "Signer Subject identity attribute casing is not exact CN/O/OU for ${Context}: $name" }
+            }
+            $commonNames = @($attributes | Where-Object {
+              [string]::Equals($_.Groups[1].Value, 'CN', [StringComparison]::Ordinal)
+            })
+            if ($commonNames.Count -ne 1) { throw "Signer Subject must contain exactly one explicit CN for $Context." }
+            foreach ($attribute in $attributes) {
+              $value = $attribute.Groups[2].Value
+              if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+                $value = $value.Substring(1, $value.Length - 2)
+              }
+              if (-not $allowedNames.Contains($value)) {
+                throw "Signer Subject CN/O/OU is not exact author identity for ${Context}: $value"
+              }
+            }
+          }
+          Assert-RetailLensNoCheckoutSignerIdentity `
+            -Subject $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT `
+            -Context 'configured no-checkout verifier Subject' `
+            -SubjectOnly
           foreach ($forbidden in @(
             'ESIGNER_CKA_USERNAME', 'ESIGNER_CKA_PASSWORD', 'ESIGNER_CKA_TOTP_SECRET',
             'SSL_ESIGNER_USERNAME', 'SSL_ESIGNER_PASSWORD', 'SSL_ESIGNER_TOTP_SECRET',
@@ -1146,6 +1287,10 @@ jobs:
 
           $recordPath = Join-Path $inputRoot 'signed-handoff.v2.json'
           $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+          Assert-RetailLensNoCheckoutSignerIdentity `
+            -Subject ([string]$record.signerSubject) `
+            -Context 'signer-to-verifier handoff Subject' `
+            -SubjectOnly
           $recordKeys = @($record.PSObject.Properties.Name | Sort-Object)
           $expectedRecordKeys = @(
             'archiveName', 'archiveSha256', 'files', 'handoffKind', 'machineName', 'publisherSid',
@@ -1226,10 +1371,13 @@ jobs:
               $simpleName = $signature.SignerCertificate.GetNameInfo(
                 [Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false
               )
+              Assert-RetailLensNoCheckoutSignerIdentity `
+                -SimpleName $simpleName `
+                -Subject $signature.SignerCertificate.Subject `
+                -Context "no-checkout verifier archive PE $($pe.Name)"
               if (-not $signature.TimeStamperCertificate -or
                   $signature.SignerCertificate.Thumbprint -ine $env:EXPECTED_SIGNER_THUMBPRINT -or
                   $signature.SignerCertificate.Subject -cne $env:RETAILLENS_WINDOWS_SIGNER_SUBJECT -or
-                  $simpleName -notin @('LAI ZEYU', '来泽宇') -or
                   -not (@($signature.TimeStamperCertificate.EnhancedKeyUsageList) | Where-Object { $_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.8' })) {
                 throw "Signed-verifier archive PE identity/timestamp is invalid: $($pe.Name)"
               }
@@ -1551,6 +1699,47 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
+          function Assert-RetailLensNoCheckoutSignerIdentity {
+            param(
+              [AllowEmptyString()] [string]$SimpleName = '',
+              [Parameter(Mandatory = $true)] [string]$Subject,
+              [Parameter(Mandatory = $true)] [string]$Context,
+              [switch]$SubjectOnly
+            )
+            $allowedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            [void]$allowedNames.Add('LAI ZEYU')
+            [void]$allowedNames.Add('来泽宇')
+            if (-not $SubjectOnly -and -not $allowedNames.Contains($SimpleName)) {
+              throw "Signer SimpleName is not exact author identity for ${Context}: $SimpleName"
+            }
+            $attributes = [regex]::Matches(
+              $Subject,
+              '(?:^|[,;+]\s*)(CN|OU|O)=([^,;+]+)',
+              [Text.RegularExpressions.RegexOptions]::CultureInvariant -bor
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            foreach ($attribute in $attributes) {
+              $name = $attribute.Groups[1].Value
+              if (
+                -not [string]::Equals($name, 'CN', [StringComparison]::Ordinal) -and
+                -not [string]::Equals($name, 'O', [StringComparison]::Ordinal) -and
+                -not [string]::Equals($name, 'OU', [StringComparison]::Ordinal)
+              ) { throw "Signer Subject identity attribute casing is not exact CN/O/OU for ${Context}: $name" }
+            }
+            $commonNames = @($attributes | Where-Object {
+              [string]::Equals($_.Groups[1].Value, 'CN', [StringComparison]::Ordinal)
+            })
+            if ($commonNames.Count -ne 1) { throw "Signer Subject must contain exactly one explicit CN for $Context." }
+            foreach ($attribute in $attributes) {
+              $value = $attribute.Groups[2].Value
+              if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+                $value = $value.Substring(1, $value.Length - 2)
+              }
+              if (-not $allowedNames.Contains($value)) {
+                throw "Signer Subject CN/O/OU is not exact author identity for ${Context}: $value"
+              }
+            }
+          }
           if (Test-Path -LiteralPath $env:GITHUB_WORKSPACE) {
             if (@(Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Force -ErrorAction Stop).Count -ne 0) {
               throw 'No-checkout publisher workspace is not empty; runner is not fresh.'
@@ -1689,6 +1878,10 @@ jobs:
 
           $recordPath = Join-Path $inputRoot 'verified-handoff.v1.json'
           $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+          Assert-RetailLensNoCheckoutSignerIdentity `
+            -Subject ([string]$record.signerSubject) `
+            -Context 'verifier-to-publisher handoff Subject' `
+            -SubjectOnly
           $recordKeys = @($record.PSObject.Properties.Name | Sort-Object)
           $expectedRecordKeys = @(
             'archiveName', 'archiveSha256', 'files', 'handoffKind', 'lifecycleRounds', 'machineName', 'publisherSid',
@@ -1782,11 +1975,14 @@ jobs:
               $simpleName = $signature.SignerCertificate.GetNameInfo(
                 [Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false
               )
+              Assert-RetailLensNoCheckoutSignerIdentity `
+                -SimpleName $simpleName `
+                -Subject $signature.SignerCertificate.Subject `
+                -Context "no-checkout publisher archive PE $($pe.Name)"
               if (
                 -not $signature.TimeStamperCertificate -or
                 $signature.SignerCertificate.Thumbprint -ine $env:EXPECTED_SIGNER_THUMBPRINT -or
                 $signature.SignerCertificate.Subject -cne [string]$record.signerSubject -or
-                $simpleName -notin @('LAI ZEYU', '来泽宇') -or
                 -not (@($signature.TimeStamperCertificate.EnhancedKeyUsageList) | Where-Object { $_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.8' })
               ) { throw "Publication archive PE signature is invalid: $($pe.Name)" }
             }
