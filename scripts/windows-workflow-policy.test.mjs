@@ -72,6 +72,8 @@ describe("fail-closed Windows workflow source policy", () => {
     expect(trustedSdk).toContain("X509RevocationMode]::Online");
     expect(asar).toContain("Designed and authored by: LAI ZEYU（来泽宇）");
     expect(asar).toContain("integrity?.algorithm !== \"SHA256\"");
+    expect(asar).toContain('lookupPath.replaceAll("\\\\", "/")');
+    expect(asar).toContain('normalizeAsarEntryPath("\\\\dist\\\\index.html")');
   });
 
   it("keeps one unsigned Store submission, proves QA payload equivalence, and retains only a private local handoff", () => {
