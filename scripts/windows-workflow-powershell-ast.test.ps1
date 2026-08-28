@@ -3,8 +3,8 @@ Set-StrictMode -Version Latest
 
 $workflowRoot = Join-Path (Split-Path $PSScriptRoot -Parent) ".github/workflows"
 $workflowFiles = @(Get-ChildItem -LiteralPath $workflowRoot -Filter "windows-*.yml" -File)
-if ($workflowFiles.Count -ne 3) {
-  throw "Expected exactly three Windows workflows for embedded PowerShell validation."
+if ($workflowFiles.Count -ne 4) {
+  throw "Expected exactly four Windows workflows for embedded PowerShell validation."
 }
 
 $allErrors = [Collections.Generic.List[object]]::new()

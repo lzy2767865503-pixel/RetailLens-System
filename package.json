@@ -47,7 +47,8 @@
     "metadata:attribution": "node scripts/verify-attribution.mjs",
     "metadata:sbom": "node scripts/generate-sbom.mjs",
     "package:windows": "pnpm metadata:attribution && pnpm build && electron-builder --config electron-builder.config.cjs --win --x64 --dir --publish never",
-    "package:store": "node scripts/validate-store-env.mjs && node scripts/validate-certification-gates.mjs && pnpm metadata:attribution && pnpm build && electron-builder --config electron-builder.config.cjs --win appx --x64 --publish never"
+    "package:store": "node scripts/validate-store-env.mjs && node scripts/validate-certification-gates.mjs && pnpm metadata:attribution && pnpm build && electron-builder --config electron-builder.config.cjs --win appx --x64 --publish never",
+    "package:store:candidate": "node scripts/validate-store-env.mjs && pnpm metadata:attribution && pnpm build && electron-builder --config electron-builder.config.cjs --win appx --x64 --publish never"
   },
   "dependencies": {
     "dotenv": "17.4.2",

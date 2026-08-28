@@ -1,0 +1,376 @@
+name: Partner Center Store candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_partner_center_candidate:
+        description: Build the unsigned Partner Center AppX after two exact-byte runtime and static passes
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retaillens-partner-center-candidate
+  cancel-in-progress: false
+
+jobs:
+  build-test-and-stage:
+    name: Store candidate - two runtime and two static passes
+    if: >-
+      github.repository_id == '1313443623' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.actor == 'lzy2767865503-pixel' &&
+      github.triggering_actor == 'lzy2767865503-pixel' &&
+      inputs.create_partner_center_candidate
+    runs-on: windows-latest
+    timeout-minutes: 100
+    env:
+      RETAILLENS_STORE_IDENTITY_NAME: ${{ vars.RETAILLENS_WINDOWS_IDENTITY_NAME }}
+      RETAILLENS_STORE_PUBLISHER: ${{ vars.WINDOWS_PUBLISHER }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - name: Check out the exact protected-main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove repository, commit, identity, authorship, and clean source
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'lzy2767865503-pixel/RetailLens-System' -or
+              $env:GITHUB_REPOSITORY_ID -cne '1313443623') {
+            throw 'Store candidate workflow is bound to the wrong repository.'
+          }
+          $Head = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $Head -cne $env:GITHUB_SHA -or
+              $Head -cnotmatch '^[a-f0-9]{40}$') {
+            throw 'Checkout is not the exact workflow-dispatch commit.'
+          }
+          if (-not [string]::IsNullOrWhiteSpace((& git status --porcelain))) {
+            throw 'Checkout is not clean before the Store build.'
+          }
+          if ($env:RETAILLENS_STORE_IDENTITY_NAME -cne 'LAIZEYU.RetailDecisionStudiobyLAIZEYU' -or
+              $env:RETAILLENS_STORE_PUBLISHER -cne 'CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8') {
+            throw 'Repository variables differ from the exact Partner Center identity.'
+          }
+          $Package = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($Package.name -cne 'retaillens-system' -or
+              $Package.version -cne '1.1.0' -or
+              $Package.author.name -cne 'LAI ZEYU（来泽宇）') {
+            throw 'Package metadata lost the exact reviewed product version or author.'
+          }
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: pnpm
+
+      - name: Install locked dependencies and run source gates
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          pnpm install --frozen-lockfile
+          node scripts/validate-store-env.mjs
+          pnpm audit:prod
+          pnpm audit:all
+          pnpm test
+          pnpm metadata:attribution
+          pnpm metadata:notices:check
+          pnpm metadata:sbom
+          ./scripts/windows-signer-policy.test.ps1
+          ./scripts/windows-no-checkout-signer-policy.test.ps1
+          ./scripts/windows-file-policy.test.ps1
+          ./scripts/windows-wack-policy.test.ps1
+          ./scripts/windows-staging-policy.test.ps1
+          ./scripts/windows-workflow-powershell-ast.test.ps1
+          pnpm test:desktop
+
+      - name: Build exact unsigned Partner Center AppX
+        timeout-minutes: 20
+        shell: pwsh
+        run: pnpm package:store:candidate
+
+      - name: Require one AppX and one matching packaged executable
+        shell: pwsh
+        run: |
+          $Appx = @(Get-ChildItem release/windows -File -Filter '*.appx')
+          if ($Appx.Count -ne 1 -or
+              $Appx[0].Name -cne 'RetailDecisionStudioByLAIZEYU-1.1.0-x64.appx') {
+            throw 'Expected exactly the reviewed Retail Decision Studio 1.1.0 x64 AppX.'
+          }
+          if ((Get-AuthenticodeSignature -LiteralPath $Appx[0].FullName).Status -ne
+              [Management.Automation.SignatureStatus]::NotSigned) {
+            throw 'Partner Center source AppX must remain unsigned.'
+          }
+          $Executable = @(Get-ChildItem release/windows/win-unpacked -File |
+            Where-Object { $_.Name -ceq 'Retail Decision Studio by LAI ZEYU.exe' })
+          if ($Executable.Count -ne 1) { throw 'Exact packaged executable is missing or ambiguous.' }
+          ./scripts/windows-verify-pe-metadata.ps1 -ExecutablePath @($Executable[0].FullName)
+          $AppxHash = (Get-FileHash -LiteralPath $Appx[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $ExecutableHash = (Get-FileHash -LiteralPath $Executable[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "RETAILLENS_STORE_APPX=$($Appx[0].FullName)" >> $env:GITHUB_ENV
+          "RETAILLENS_STORE_APPX_SHA256=$AppxHash" >> $env:GITHUB_ENV
+          "RETAILLENS_STORE_EXECUTABLE=$($Executable[0].FullName)" >> $env:GITHUB_ENV
+          "RETAILLENS_STORE_EXECUTABLE_SHA256=$ExecutableHash" >> $env:GITHUB_ENV
+
+      - name: Packaged runtime Pass A on exact AppX executable bytes
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          ./scripts/windows-hosted-store-runtime.ps1 `
+            -ExecutablePath $env:RETAILLENS_STORE_EXECUTABLE `
+            -ExpectedExecutableSha256 $env:RETAILLENS_STORE_EXECUTABLE_SHA256 `
+            -CandidateAppxSha256 $env:RETAILLENS_STORE_APPX_SHA256 `
+            -EvidenceDirectory ./evidence/partner-center/runtime-pass-a `
+            -Round 1
+
+      - name: Packaged runtime Pass B with four Store screenshots
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          if ((Get-FileHash -LiteralPath $env:RETAILLENS_STORE_APPX -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+              $env:RETAILLENS_STORE_APPX_SHA256) {
+            throw 'AppX bytes changed between runtime passes.'
+          }
+          ./scripts/windows-hosted-store-runtime.ps1 `
+            -ExecutablePath $env:RETAILLENS_STORE_EXECUTABLE `
+            -ExpectedExecutableSha256 $env:RETAILLENS_STORE_EXECUTABLE_SHA256 `
+            -CandidateAppxSha256 $env:RETAILLENS_STORE_APPX_SHA256 `
+            -EvidenceDirectory ./evidence/partner-center/runtime-pass-b `
+            -Round 2
+          if ((Get-FileHash -LiteralPath $env:RETAILLENS_STORE_APPX -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+              $env:RETAILLENS_STORE_APPX_SHA256) {
+            throw 'AppX bytes changed during runtime Pass B.'
+          }
+
+      - name: Store AppX static Pass A
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          ./scripts/windows-inspect-store-submission.ps1 `
+            -AppxPath $env:RETAILLENS_STORE_APPX `
+            -ExpectedExecutableSha256 $env:RETAILLENS_STORE_EXECUTABLE_SHA256 `
+            -EvidenceDirectory ./evidence/partner-center/static-pass-a `
+            -Round 1
+
+      - name: Store AppX static Pass B on identical bytes
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          ./scripts/windows-inspect-store-submission.ps1 `
+            -AppxPath $env:RETAILLENS_STORE_APPX `
+            -ExpectedExecutableSha256 $env:RETAILLENS_STORE_EXECUTABLE_SHA256 `
+            -EvidenceDirectory ./evidence/partner-center/static-pass-b `
+            -Round 2
+
+      - name: Cross-check both runtime and static passes
+        shell: pwsh
+        run: |
+          $RuntimeA = Get-Content evidence/partner-center/runtime-pass-a/runtime-inspection.json -Raw | ConvertFrom-Json
+          $RuntimeB = Get-Content evidence/partner-center/runtime-pass-b/runtime-inspection.json -Raw | ConvertFrom-Json
+          foreach ($Field in @('product', 'author', 'sourceCommit', 'appxSha256', 'executable', 'executableSha256')) {
+            if ([string]$RuntimeA.$Field -cne [string]$RuntimeB.$Field) {
+              throw "Runtime passes disagree on $Field."
+            }
+          }
+          if ([int]$RuntimeA.round -ne 1 -or [int]$RuntimeB.round -ne 2 -or
+              [int]$RuntimeA.screenshotCount -ne 0 -or [int]$RuntimeB.screenshotCount -ne 4 -or
+              [string]$RuntimeB.screenshotManifestSha256 -cnotmatch '^[a-f0-9]{64}$') {
+            throw 'Runtime passes do not prove two rounds and the exact four-screenshot result.'
+          }
+
+          $StaticA = Get-Content evidence/partner-center/static-pass-a/store-inspection.json -Raw | ConvertFrom-Json
+          $StaticB = Get-Content evidence/partner-center/static-pass-b/store-inspection.json -Raw | ConvertFrom-Json
+          foreach ($Field in @(
+            'product', 'author', 'publisherDisplayName', 'storeProductId', 'identityName', 'publisher',
+            'version', 'architecture', 'applicationId', 'executable', 'sourceCommit', 'appxFile',
+            'appxSha256', 'manifestSha256', 'executableSha256', 'asarSha256', 'asarInventorySha256',
+            'unpackedInventorySha256', 'unpackedFileCount', 'unpackedBytes',
+            'makeAppxSha256', 'makeAppxFileVersion'
+          )) {
+            if ([string]$StaticA.$Field -cne [string]$StaticB.$Field) {
+              throw "Static Store passes disagree on $Field."
+            }
+          }
+          if ([int]$StaticA.round -ne 1 -or [int]$StaticB.round -ne 2 -or
+              [string]$StaticA.appxSha256 -cne $env:RETAILLENS_STORE_APPX_SHA256 -or
+              [string]$StaticA.executableSha256 -cne $env:RETAILLENS_STORE_EXECUTABLE_SHA256 -or
+              [string]$RuntimeA.appxSha256 -cne [string]$StaticA.appxSha256 -or
+              [string]$RuntimeA.executableSha256 -cne [string]$StaticA.executableSha256 -or
+              [string]$StaticA.author -cne 'LAI ZEYU（来泽宇）') {
+            throw 'Runtime/static evidence is not bound to the one exact AppX, executable, and author.'
+          }
+
+          $SbomPath = 'release/metadata/retaillens-1.1.0.spdx.json'
+          $Sbom = Get-Content -LiteralPath $SbomPath -Raw | ConvertFrom-Json
+          if ($Sbom.spdxVersion -cne 'SPDX-2.3' -or
+              $Sbom.name -cne 'RetailLens-1.1.0' -or
+              @($Sbom.packages).Count -lt 10) {
+            throw 'Generated SPDX SBOM is malformed or unexpectedly incomplete.'
+          }
+
+      - name: Freeze minimal Partner Center handoff with lineage
+        shell: pwsh
+        run: |
+          & git fetch --no-tags --depth=1 origin main
+          if ($LASTEXITCODE -ne 0) { throw 'Could not refresh public main for final lineage check.' }
+          $RemoteMain = (& git rev-parse origin/main).Trim()
+          if ($LASTEXITCODE -ne 0 -or $RemoteMain -cne $env:GITHUB_SHA) {
+            throw 'Main advanced during the Store build; refusing a stale Partner Center candidate.'
+          }
+          if (-not [string]::IsNullOrWhiteSpace((& git status --porcelain --untracked-files=no))) {
+            throw 'Tracked source changed during the Store build.'
+          }
+
+          $Stage = 'partner-center-candidate'
+          if (Test-Path -LiteralPath $Stage) { throw 'Partner Center staging directory already exists.' }
+          foreach ($Directory in @(
+            "$Stage/evidence/runtime-pass-a",
+            "$Stage/evidence/runtime-pass-b",
+            "$Stage/evidence/static-pass-a",
+            "$Stage/evidence/static-pass-b"
+          )) {
+            New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+          }
+          Copy-Item -LiteralPath $env:RETAILLENS_STORE_APPX -Destination $Stage
+          Copy-Item -LiteralPath release/metadata/retaillens-1.1.0.spdx.json -Destination $Stage
+          Copy-Item -LiteralPath evidence/partner-center/runtime-pass-a/runtime-inspection.json -Destination "$Stage/evidence/runtime-pass-a"
+          Copy-Item -LiteralPath evidence/partner-center/runtime-pass-b/runtime-inspection.json -Destination "$Stage/evidence/runtime-pass-b"
+          Copy-Item -LiteralPath evidence/partner-center/runtime-pass-b/screenshots -Destination "$Stage/evidence/runtime-pass-b" -Recurse
+          foreach ($Pass in @('static-pass-a', 'static-pass-b')) {
+            Copy-Item -LiteralPath "evidence/partner-center/$Pass/store-inspection.json" -Destination "$Stage/evidence/$Pass"
+            Copy-Item -LiteralPath "evidence/partner-center/$Pass/asar-inspection.json" -Destination "$Stage/evidence/$Pass"
+            Copy-Item -LiteralPath "evidence/partner-center/$Pass/unpacked-inventory.txt" -Destination "$Stage/evidence/$Pass"
+          }
+
+          $Reparse = @((Get-Item -LiteralPath $Stage -Force)) +
+            @(Get-ChildItem -LiteralPath $Stage -Recurse -Force) |
+            Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }
+          if ($Reparse.Count -gt 0) { throw 'Partner Center staging tree contains a reparse point.' }
+          $Forbidden = @(Get-ChildItem -LiteralPath $Stage -Recurse -File -Force | Where-Object {
+            $_.Extension -in @('.exe', '.dll', '.zip', '.msi', '.pfx', '.p12', '.key', '.pem', '.cer', '.crt')
+          })
+          if ($Forbidden.Count -gt 0) { throw "Forbidden loose handoff file: $($Forbidden[0].FullName)" }
+          $AppxFiles = @(Get-ChildItem -LiteralPath $Stage -File -Filter '*.appx')
+          if ($AppxFiles.Count -ne 1 -or
+              $AppxFiles[0].Name -cne 'RetailDecisionStudioByLAIZEYU-1.1.0-x64.appx') {
+            throw 'Handoff must contain exactly one top-level AppX.'
+          }
+          $TextFiles = @(Get-ChildItem -LiteralPath $Stage -Recurse -File -Include '*.json', '*.txt')
+          if ($TextFiles | Select-String -Pattern '(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|OPENAI_API_KEY') {
+            throw 'Partner Center handoff contains a secret-like text pattern.'
+          }
+
+          $ContentFiles = @(Get-ChildItem -LiteralPath $Stage -Recurse -File -Force | Sort-Object FullName)
+          $Content = @($ContentFiles | ForEach-Object {
+            [ordered]@{
+              path = [IO.Path]::GetRelativePath((Resolve-Path $Stage), $_.FullName).Replace('\', '/')
+              bytes = $_.Length
+              sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          })
+          $Inspection = Get-Content "$Stage/evidence/static-pass-a/store-inspection.json" -Raw | ConvertFrom-Json
+          $ScreenshotManifest = Get-Content "$Stage/evidence/runtime-pass-b/screenshots/store-screenshot-capture.v1.json" -Raw | ConvertFrom-Json
+          [ordered]@{
+            schemaVersion = 1
+            purpose = 'Unsigned Partner Center submission candidate; not a public GitHub installer'
+            product = 'Retail Decision Studio by LAI ZEYU'
+            author = 'LAI ZEYU（来泽宇）'
+            publisherDisplayName = 'LAI ZEYU'
+            storeProductId = '9NVNLQWQBKHD'
+            identityName = 'LAIZEYU.RetailDecisionStudiobyLAIZEYU'
+            publisher = 'CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8'
+            sourceCommit = $env:GITHUB_SHA
+            repository = $env:GITHUB_REPOSITORY
+            repositoryId = $env:GITHUB_REPOSITORY_ID
+            workflow = $env:GITHUB_WORKFLOW
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            appxSha256 = [string]$Inspection.appxSha256
+            executableSha256 = [string]$Inspection.executableSha256
+            appxUnsigned = $true
+            runtimePasses = 2
+            staticPasses = 2
+            screenshotCount = [int]$ScreenshotManifest.screenshotCount
+            screenshotDimensions = '1366x768'
+            sbomFormat = 'SPDX-2.3'
+            content = $Content
+            createdAtUtc = [DateTime]::UtcNow.ToString('o')
+          } | ConvertTo-Json -Depth 6 | Set-Content "$Stage/LINEAGE.json" -Encoding utf8
+
+          $Checksummed = @(Get-ChildItem -LiteralPath $Stage -Recurse -File -Force | Sort-Object FullName)
+          $ChecksumLines = @($Checksummed | ForEach-Object {
+            $Relative = [IO.Path]::GetRelativePath((Resolve-Path $Stage), $_.FullName).Replace('\', '/')
+            $Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$Hash  $Relative"
+          })
+          [IO.File]::WriteAllText(
+            (Join-Path (Resolve-Path $Stage) 'SHA256SUMS.txt'),
+            ($ChecksumLines -join "`n") + "`n",
+            [Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Upload one-day Partner Center candidate artifact
+        id: candidate-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: retaillens-partner-center-${{ github.sha }}
+          path: partner-center-candidate
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Record exact handoff result
+        shell: pwsh
+        run: |
+          $Inspection = Get-Content partner-center-candidate/evidence/static-pass-a/store-inspection.json -Raw | ConvertFrom-Json
+          @(
+            '## Retail Decision Studio Partner Center candidate',
+            '',
+            '- Runtime Pass A: PASS',
+            '- Runtime Pass B: PASS',
+            '- Static AppX Pass A: PASS',
+            '- Static AppX Pass B: PASS',
+            '- Store screenshots: `4 x 1366x768`',
+            '- Author: `LAI ZEYU（来泽宇）`',
+            '- Publisher display name: `LAI ZEYU`',
+            "- Source commit: ``$env:GITHUB_SHA``",
+            "- AppX SHA-256: ``$($Inspection.appxSha256)``",
+            "- Artifact digest: ``${{ steps.candidate-upload.outputs.artifact-digest }}``",
+            '- Scope: unsigned Microsoft Store submission candidate only; no public GitHub installer was released'
+          ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Remove candidate bytes from the runner
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($Path in @('partner-center-candidate', 'evidence', 'release/windows')) {
+            if (Test-Path -LiteralPath $Path) {
+              $Items = @((Get-Item -LiteralPath $Path -Force)) +
+                @(Get-ChildItem -LiteralPath $Path -Recurse -Force)
+              if (@($Items | Where-Object {
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+              }).Count -gt 0) {
+                throw "Refusing cleanup of a reparse-bearing generated tree: $Path"
+              }
+              Remove-Item -LiteralPath $Path -Recurse -Force
+            }
+            if (Test-Path -LiteralPath $Path) { throw "Runner cleanup failed: $Path" }
+          }

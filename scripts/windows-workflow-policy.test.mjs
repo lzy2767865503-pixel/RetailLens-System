@@ -15,12 +15,63 @@ describe("fail-closed Windows workflow source policy", () => {
     for (const workflowPath of [
       ".github/workflows/windows-quality.yml",
       ".github/workflows/windows-store.yml",
+      ".github/workflows/windows-store-candidate.yml",
       ".github/workflows/windows-github-release.yml"
     ]) {
       const workflow = read(workflowPath);
       expect(workflow).not.toContain("TestOnlyAllowUntrustedSigner");
       expect(workflow).not.toContain("RETAILLENS_TEST_ONLY_UNTRUSTED_SIGNER_ROOT");
     }
+  });
+
+  it("builds a one-day protected-main Partner Center candidate on GitHub-hosted Windows", () => {
+    const workflow = read(".github/workflows/windows-store-candidate.yml");
+    const runtime = read("scripts/windows-hosted-store-runtime.ps1");
+    const inspection = read("scripts/windows-inspect-store-submission.ps1");
+    const trustedSdk = read("scripts/windows-trusted-sdk-tool.ps1");
+    const asar = read("scripts/inspect-store-asar.mjs");
+
+    expect(workflow).toContain("github.repository_id == '1313443623'");
+    expect(workflow).toContain("github.ref == 'refs/heads/main'");
+    expect(workflow).toContain("github.ref_protected == true");
+    expect(workflow).toContain("github.actor == 'lzy2767865503-pixel'");
+    expect(workflow).toContain("github.triggering_actor == 'lzy2767865503-pixel'");
+    expect(workflow).toContain("inputs.create_partner_center_candidate");
+    expect(workflow).toContain("runs-on: windows-latest");
+    expect(workflow).toContain("LAIZEYU.RetailDecisionStudiobyLAIZEYU");
+    expect(workflow).toContain("CN=A5F91D0A-30C6-48EE-944F-B767FA872BE8");
+    expect(workflow.match(/windows-hosted-store-runtime\.ps1/g)).toHaveLength(2);
+    expect(workflow.match(/windows-inspect-store-submission\.ps1/g)).toHaveLength(2);
+    expect(workflow).toContain("runtimePasses = 2");
+    expect(workflow).toContain("staticPasses = 2");
+    expect(workflow).toContain("screenshotDimensions = '1366x768'");
+    expect(workflow).toContain("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
+    expect(workflow).toContain("retention-days: 1");
+    expect(workflow).toContain("Unsigned Partner Center submission candidate; not a public GitHub installer");
+    expect(workflow).not.toMatch(/contents: write|gh release|uploads\.github\.com/);
+    expect(workflow).not.toContain("RETAILLENS_CERTIFICATION_OPENAI_API_KEY");
+    expect(workflow).not.toContain("secrets.");
+    expect(workflow).not.toContain("self-hosted");
+
+    expect(runtime).toContain("Retail Decision Studio by LAI ZEYU.exe");
+    expect(runtime).toContain("LAI ZEYU（来泽宇）");
+    expect(runtime).toContain("candidateSha256 = $CandidateAppxSha256");
+    expect(runtime).toContain("Store screenshot is not exactly 1366 x 768 pixels");
+    expect(runtime).toContain("ELECTRON_WEB_CONTENTS_CAPTURE_PAGE");
+    expect(runtime).toContain("BUILT_IN_DEMO_ONLY");
+    expect(runtime).toContain("Get-NetTCPConnection");
+    expect(runtime).toContain("Remove-RetailLensRuntimeTree");
+
+    expect(inspection).toContain("SignatureStatus]::NotSigned");
+    expect(inspection).toContain("app\\Retail Decision Studio by LAI ZEYU.exe");
+    expect(inspection).toContain("ExpectedExecutableSha256");
+    expect(inspection).toContain("unpackedInventorySha256");
+    expect(inspection).toContain("Get-RetailLensTrustedWindowsSdkTool");
+    expect(inspection).toContain("Assert-RetailLensNoReparsePoint");
+    expect(trustedSdk).toContain("Microsoft Corporation");
+    expect(trustedSdk).toContain("X509RevocationMode]::Online");
+    expect(asar).toContain("Designed and authored by: LAI ZEYU（来泽宇）");
+    expect(asar).toContain("integrity?.algorithm !== \"SHA256\"");
   });
 
   it("keeps one unsigned Store submission, proves QA payload equivalence, and retains only a private local handoff", () => {
