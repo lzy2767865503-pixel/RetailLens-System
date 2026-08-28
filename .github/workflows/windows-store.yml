@@ -95,7 +95,7 @@ jobs:
         run: ./scripts/windows-retain-private-store-handoff.ps1 -PrivateRoot $env:RETAILLENS_PRIVATE_STORE_HANDOFF_ROOT -ValidateOnly
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 11.9.0
 
