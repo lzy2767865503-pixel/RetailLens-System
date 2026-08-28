@@ -2,12 +2,13 @@ cff-version: 1.2.0
 message: "If you use RetailLens, please cite this software."
 title: "RetailLens: Bilingual Retail Business Assessment System"
 type: software
+abstract: "Designed and authored by LAI ZEYU（来泽宇）."
 authors:
   - family-names: "LAI"
     given-names: "ZEYU"
     alias: "lzy2767865503-pixel"
-version: 1.0.0
-date-released: 2026-07-27
+version: 1.1.0
+date-released: 2026-08-27
 license: MIT
 repository-code: "https://github.com/lzy2767865503-pixel/RetailLens-System"
 url: "https://github.com/lzy2767865503-pixel/RetailLens-System"

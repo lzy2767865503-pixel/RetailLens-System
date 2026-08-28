@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useState
+} from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -24,17 +30,11 @@ import {
   AppHeader,
   type AppSection
 } from "./components/AppHeader";
-import { ApiSettingsDialog } from "./components/ApiSettingsDialog";
-import { ExecutiveConsultingView } from "./components/ExecutiveConsultingView";
-import { EnterpriseTheoryView } from "./components/EnterpriseTheoryView";
 import {
   createEmptyDraft,
   IntakeWizard,
   type RetailIntakeDraft
 } from "./components/IntakeWizard";
-import { MethodologyView } from "./components/MethodologyView";
-import { ReportView } from "./components/ReportView";
-import { StrategyMatrices } from "./components/StrategyMatrices";
 import {
   BusinessInputSchema,
   buildConsultingAssessment,
@@ -51,11 +51,47 @@ import {
 } from "./hooks/useApiSettings";
 import { usePersistentDraft } from "./hooks/usePersistentDraft";
 import type { Locale } from "./i18n";
+import {
+  clearRetailLensBusinessData,
+  RETAILLENS_DRAFT_STORAGE_KEY,
+  RETAILLENS_LOCALE_STORAGE_KEY
+} from "./storage";
 
-const DRAFT_KEY = "retaillens.business-draft";
+const ApiSettingsDialog = lazy(
+  () => import("./components/ApiSettingsDialog")
+);
+const AboutPrivacyDialog = lazy(
+  () => import("./components/AboutPrivacyDialog")
+);
+const ExecutiveConsultingView = lazy(() =>
+  import("./components/ExecutiveConsultingView").then((module) => ({
+    default: module.ExecutiveConsultingView
+  }))
+);
+const EnterpriseTheoryView = lazy(() =>
+  import("./components/EnterpriseTheoryView").then((module) => ({
+    default: module.EnterpriseTheoryView
+  }))
+);
+const MethodologyView = lazy(() =>
+  import("./components/MethodologyView").then((module) => ({
+    default: module.MethodologyView
+  }))
+);
+const ReportView = lazy(() =>
+  import("./components/ReportView").then((module) => ({
+    default: module.ReportView
+  }))
+);
+const StrategyMatrices = lazy(
+  () => import("./components/StrategyMatrices")
+);
+
+const DRAFT_KEY = RETAILLENS_DRAFT_STORAGE_KEY;
 const DRAFT_VERSION = 2;
+const INITIAL_DRAFT = createEmptyDraft();
 
-function localAiUnavailable(model = "gpt-5.6-sol"): AiAnalysis {
+function localAiUnavailable(model = "gpt-5"): AiAnalysis {
   return {
     status: "unavailable",
     model,
@@ -65,7 +101,7 @@ function localAiUnavailable(model = "gpt-5.6-sol"): AiAnalysis {
 
 export default function App() {
   const [locale, setLocale] = useState<Locale>(() =>
-    window.localStorage.getItem("retaillens.locale") === "en"
+    window.localStorage.getItem(RETAILLENS_LOCALE_STORAGE_KEY) === "en"
       ? "en"
       : "zh"
   );
@@ -75,11 +111,12 @@ export default function App() {
     value: draft,
     setValue: setDraft,
     save,
+    reset,
     savedAt
   } = usePersistentDraft<RetailIntakeDraft>(
     DRAFT_KEY,
     DRAFT_VERSION,
-    createEmptyDraft()
+    INITIAL_DRAFT
   );
   const [frameworks, setFrameworks] =
     useState<BusinessInput["frameworks"]>(EMPTY_FRAMEWORKS);
@@ -89,6 +126,7 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
+  const [aboutPrivacyOpen, setAboutPrivacyOpen] = useState(false);
   const health = useApiHealth();
   const apiSettings = useApiSettings();
   const isZh = locale === "zh";
@@ -100,15 +138,12 @@ export default function App() {
     ? apiSettings.settings.model
     : health.status === "ready"
       ? health.value.ai.model
-      : "gpt-5.6-sol";
+      : "gpt-5";
 
   useEffect(() => {
-    window.localStorage.setItem("retaillens.locale", locale);
+    window.localStorage.setItem(RETAILLENS_LOCALE_STORAGE_KEY, locale);
     document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
-    document.title =
-      locale === "zh"
-        ? "RetailLens / 零售透镜"
-        : "RetailLens / Retail Business Assessment";
+    document.title = "Retail Decision Studio by LAI ZEYU";
   }, [locale]);
 
   const report = useMemo(
@@ -265,6 +300,18 @@ export default function App() {
     }
   };
 
+  const clearLocalBusinessData = () => {
+    clearRetailLensBusinessData(window.localStorage);
+    reset();
+    apiSettings.clearSettings();
+    setFrameworks(structuredClone(EMPTY_FRAMEWORKS));
+    setInput(null);
+    setScore(null);
+    setAi(null);
+    setError(null);
+    setActiveSection("assessment");
+  };
+
   return (
     <div className="app">
       <AppHeader
@@ -307,52 +354,68 @@ export default function App() {
         />
       )}
 
-      {activeSection === "reports" &&
-        (report &&
-        input &&
-        score &&
-        consultingAssessment &&
-        enterpriseTheoryAssessment ? (
-          <ReportView
-            locale={locale}
-            report={report}
-            ai={ai}
-            aiLoading={submitting}
-            executiveContent={
-              <ExecutiveConsultingView
-                locale={locale}
-                assessment={consultingAssessment}
-              />
-            }
-            theoryContent={
-              <EnterpriseTheoryView
-                locale={locale}
-                assessment={enterpriseTheoryAssessment}
-              />
-            }
-            matrixContent={
-              <StrategyMatrices
-                locale={locale}
-                data={businessToStrategyData(input, score)}
-              />
-            }
-            onRetryAi={retryAi}
-            onEdit={() => setActiveSection("assessment")}
-            onOpenMethodology={() => setActiveSection("methodology")}
-          />
-        ) : (
-          <EmptyReport
-            locale={locale}
-            onStart={() => setActiveSection("assessment")}
-          />
-        ))}
+      <Suspense
+        fallback={
+          <main className="page-loading" role="status">
+            {isZh ? "正在载入工作区…" : "Loading workspace…"}
+          </main>
+        }
+      >
+        {activeSection === "reports" &&
+          (report &&
+          input &&
+          score &&
+          consultingAssessment &&
+          enterpriseTheoryAssessment ? (
+            <ReportView
+              locale={locale}
+              report={report}
+              ai={ai}
+              aiLoading={submitting}
+              executiveContent={
+                <ExecutiveConsultingView
+                  locale={locale}
+                  assessment={consultingAssessment}
+                />
+              }
+              theoryContent={
+                <EnterpriseTheoryView
+                  locale={locale}
+                  assessment={enterpriseTheoryAssessment}
+                />
+              }
+              matrixContent={
+                <StrategyMatrices
+                  locale={locale}
+                  data={businessToStrategyData(input, score)}
+                />
+              }
+              onRetryAi={retryAi}
+              onEdit={() => setActiveSection("assessment")}
+              onOpenMethodology={() => setActiveSection("methodology")}
+            />
+          ) : (
+            <EmptyReport
+              locale={locale}
+              onStart={() => setActiveSection("assessment")}
+            />
+          ))}
 
-      {activeSection === "methodology" && (
-        <MethodologyView locale={locale} />
-      )}
+        {activeSection === "methodology" && (
+          <MethodologyView locale={locale} />
+        )}
+      </Suspense>
 
-      <footer className="app-authorship">
-        <span>RetailLens 1.0</span>
+      <footer
+        className={
+          activeSection === "assessment"
+            ? "app-authorship has-fixed-action"
+            : "app-authorship"
+        }
+      >
+        <span>
+          Retail Decision Studio by LAI ZEYU {__APP_VERSION__}
+        </span>
         <span>
           {isZh ? "设计与作者：" : "Designed and authored by "}
           <a
@@ -360,7 +423,7 @@ export default function App() {
             target="_blank"
             rel="noreferrer"
           >
-            LAI ZEYU
+            LAI ZEYU（来泽宇）
           </a>
         </span>
         <a
@@ -370,22 +433,40 @@ export default function App() {
         >
           MIT License
         </a>
+        <button
+          className="footer-link-button"
+          type="button"
+          onClick={() => setAboutPrivacyOpen(true)}
+          data-testid="open-about-privacy"
+        >
+          {isZh ? "关于与隐私" : "About & privacy"}
+        </button>
       </footer>
 
-      {apiSettingsOpen && (
-        <ApiSettingsDialog
-          open
-          locale={locale}
-          value={apiSettings.settings}
-          onClose={() => setApiSettingsOpen(false)}
-          onSave={saveApiSettings}
-          onClear={clearApiSettings}
-          onTestConnection={(settings, signal) =>
-            testAiConnection(settings, signal)
-          }
-          disabled={submitting}
-        />
-      )}
+      <Suspense fallback={null}>
+        {apiSettingsOpen && (
+          <ApiSettingsDialog
+            open
+            locale={locale}
+            value={apiSettings.settings}
+            onClose={() => setApiSettingsOpen(false)}
+            onSave={saveApiSettings}
+            onClear={clearApiSettings}
+            onTestConnection={(settings, signal) =>
+              testAiConnection(settings, signal)
+            }
+            disabled={submitting}
+          />
+        )}
+        {aboutPrivacyOpen && (
+          <AboutPrivacyDialog
+            open
+            locale={locale}
+            onClose={() => setAboutPrivacyOpen(false)}
+            onClearLocalData={clearLocalBusinessData}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

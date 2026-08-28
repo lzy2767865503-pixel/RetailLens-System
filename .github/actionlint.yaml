@@ -1,0 +1,11 @@
+self-hosted-runner:
+  labels:
+    - retaillens-wack
+    - interactive
+    - elevated
+    - retaillens-release-build
+    - retaillens-release-signing
+    - retaillens-release-verifier
+    - retaillens-release-publisher
+    - ephemeral
+    - no-checkout

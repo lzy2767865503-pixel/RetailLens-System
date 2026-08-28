@@ -1,5 +1,6 @@
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import type { Server } from "node:http";
+import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import express, {
   type ErrorRequestHandler,
@@ -38,10 +39,9 @@ import {
   type ValidationErrorBody
 } from "./schemas";
 
-const PROJECT_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  ".."
-);
+const PROJECT_ROOT = process.env.RETAILLENS_PROJECT_ROOT
+  ? path.resolve(process.env.RETAILLENS_PROJECT_ROOT)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST_DIRECTORY = path.join(PROJECT_ROOT, "dist");
 
 export const OPENAI_KEY_HEADER = "X-RetailLens-OpenAI-Key";
@@ -72,6 +72,18 @@ export interface AppDependencies {
   aiConnectionTester?: AiConnectionTester;
   businessSchema?: z.ZodType<unknown>;
   businessScorer?: (business: unknown) => unknown;
+  expectedOrigin?: string;
+}
+
+function isPermittedLoopbackHost(host: string | undefined): boolean {
+  if (!host) return false;
+
+  const match = /^127\.0\.0\.1(?::([0-9]{1,5}))?$/.exec(host);
+  if (!match) return false;
+
+  if (match[1] === undefined) return true;
+  const port = Number.parseInt(match[1], 10);
+  return port > 0 && port <= 65_535;
 }
 
 function validationError(error: z.ZodError): ValidationErrorBody {
@@ -189,9 +201,13 @@ export function createApp({
   aiInterpreter = interpretBusinessWithAi,
   aiConnectionTester = testOpenAiConnection,
   businessSchema = BusinessInputSchema,
-  businessScorer = defaultBusinessScorer
+  businessScorer = defaultBusinessScorer,
+  expectedOrigin
 }: AppDependencies = {}) {
   const app = express();
+  const desktopOrigin = expectedOrigin
+    ? new URL(expectedOrigin)
+    : null;
   const apiRequestSchema = z
     .object({
       language: SupportedLanguageSchema,
@@ -200,6 +216,49 @@ export function createApp({
     .strict();
 
   app.disable("x-powered-by");
+  app.use((request, response, next) => {
+    const requestHost = request.get("host");
+    const requestOrigin = request.get("origin");
+    const fetchSite = request.get("sec-fetch-site");
+    const hostPermitted = desktopOrigin
+      ? requestHost === desktopOrigin.host
+      : isPermittedLoopbackHost(requestHost);
+
+    if (!hostPermitted) {
+      response.status(421).json({
+        error: "unexpected_host",
+        message: "The request host is not permitted."
+      });
+      return;
+    }
+
+    if (
+      desktopOrigin &&
+      requestOrigin !== undefined &&
+      requestOrigin !== desktopOrigin.origin
+    ) {
+      response.status(403).json({
+        error: "unexpected_origin",
+        message: "The request origin is not permitted."
+      });
+      return;
+    }
+
+    if (
+      desktopOrigin &&
+      fetchSite !== undefined &&
+      fetchSite !== "same-origin" &&
+      fetchSite !== "none"
+    ) {
+      response.status(403).json({
+        error: "cross_site_request_denied",
+        message: "Cross-site requests are not permitted."
+      });
+      return;
+    }
+
+    next();
+  });
   app.use(
     helmet({
       contentSecurityPolicy:
@@ -233,6 +292,7 @@ export function createApp({
     response.json({
       status: "ok",
       service: "RetailLens API",
+      processId: process.pid,
       languages: ["zh", "en"],
       ai: {
         provider: "openai",
@@ -479,23 +539,53 @@ export function createApp({
 
 export const app = createApp();
 
-export function startServer() {
-  const port = Number.parseInt(process.env.PORT ?? "8787", 10);
-  const safePort =
-    Number.isInteger(port) && port > 0 && port <= 65_535 ? port : 8787;
-
-  return app.listen(safePort, "127.0.0.1", () => {
-    // Do not include environment variables or credential material in logs.
-    console.log(
-      `RetailLens API listening on http://127.0.0.1:${safePort}`
-    );
-  });
+export interface StartServerOptions {
+  /** Use 0 to ask the operating system for an unused ephemeral port. */
+  port?: number;
+  log?: boolean;
+  expectedOrigin?: string;
 }
 
-const entryPath = process.argv[1]
-  ? pathToFileURL(path.resolve(process.argv[1])).href
-  : undefined;
+function configuredPort(): number {
+  const value = Number.parseInt(process.env.PORT ?? "8787", 10);
+  return Number.isInteger(value) && value > 0 && value <= 65_535
+    ? value
+    : 8787;
+}
 
-if (entryPath === import.meta.url) {
-  startServer();
+export function startServer({
+  port = configuredPort(),
+  log = true,
+  expectedOrigin
+}: StartServerOptions = {}): Promise<Server> {
+  const safePort =
+    Number.isInteger(port) && port >= 0 && port <= 65_535
+      ? port
+      : configuredPort();
+
+  return new Promise((resolve, reject) => {
+    const serverApp = expectedOrigin
+      ? createApp({ expectedOrigin })
+      : app;
+    const server = serverApp.listen(safePort, "127.0.0.1");
+
+    server.once("error", reject);
+    server.once("listening", () => {
+      server.off("error", reject);
+
+      if (log) {
+        const address = server.address();
+        const actualPort =
+          address && typeof address !== "string"
+            ? address.port
+            : safePort;
+        // Do not include environment variables or credential material in logs.
+        console.log(
+          `RetailLens API listening on http://127.0.0.1:${actualPort}`
+        );
+      }
+
+      resolve(server);
+    });
+  });
 }

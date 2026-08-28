@@ -50,9 +50,56 @@ afterEach(() => {
 });
 
 describe("RetailLens API", () => {
+  it("rejects DNS-rebinding and cross-origin requests in desktop mode", async () => {
+    const desktopApp = createApp({
+      expectedOrigin: "http://127.0.0.1:47824"
+    });
+
+    await request(desktopApp)
+      .get("/api/health")
+      .set("Host", "127.0.0.1:47824")
+      .expect(200);
+    await request(desktopApp)
+      .get("/api/health")
+      .set("Host", "attacker.example:47824")
+      .expect(421, {
+        error: "unexpected_host",
+        message: "The request host is not permitted."
+      });
+    await request(desktopApp)
+      .get("/api/health")
+      .set("Host", "127.0.0.1:47824")
+      .set("Origin", "https://attacker.example")
+      .expect(403, {
+        error: "unexpected_origin",
+        message: "The request origin is not permitted."
+      });
+    await request(desktopApp)
+      .get("/api/health")
+      .set("Host", "127.0.0.1:47824")
+      .set("Sec-Fetch-Site", "cross-site")
+      .expect(403, {
+        error: "cross_site_request_denied",
+        message: "Cross-site requests are not permitted."
+      });
+
+    const cliApp = createApp();
+    await request(cliApp)
+      .get("/api/health")
+      .set("Host", "127.0.0.1:8787")
+      .expect(200);
+    await request(cliApp)
+      .get("/api/health")
+      .set("Host", "attacker.example:8787")
+      .expect(421, {
+        error: "unexpected_host",
+        message: "The request host is not permitted."
+      });
+  });
+
   it("reports a safe health status when no API key is configured", async () => {
     vi.stubEnv("OPENAI_API_KEY", "");
-    vi.stubEnv("OPENAI_MODEL", "gpt-5.6-sol");
+    vi.stubEnv("OPENAI_MODEL", "gpt-5");
     const app = createApp({
       businessSchema: TestBusinessSchema,
       businessScorer: deterministicScorer
@@ -63,12 +110,13 @@ describe("RetailLens API", () => {
     expect(response.body).toEqual({
       status: "ok",
       service: "RetailLens API",
+      processId: process.pid,
       languages: ["zh", "en"],
       ai: {
         provider: "openai",
         configured: false,
         serverConfigured: false,
-        model: "gpt-5.6-sol",
+        model: "gpt-5",
         clientManagedKeysSupported: true
       }
     });
@@ -102,7 +150,7 @@ describe("RetailLens API", () => {
     const aiInterpreter = vi.fn(
       async (_args: InterpretBusinessArgs) => ({
         status: "unavailable" as const,
-        model: "gpt-5.6-sol",
+        model: "gpt-5",
         reason: "missing_api_key" as const
       })
     );
@@ -140,7 +188,7 @@ describe("RetailLens API", () => {
       async (args: InterpretBusinessArgs) => ({
         status: "unavailable" as const,
         // Simulate a faulty dependency trying to echo the credential.
-        model: args.apiKey ?? args.model ?? "gpt-5.6-sol",
+        model: args.apiKey ?? args.model ?? "gpt-5",
         reason: "missing_api_key" as const
       })
     );
@@ -153,13 +201,13 @@ describe("RetailLens API", () => {
     const response = await request(app)
       .post("/api/analyze")
       .set(OPENAI_KEY_HEADER, apiKey)
-      .set(OPENAI_MODEL_HEADER, "gpt-5.4-mini")
+      .set(OPENAI_MODEL_HEADER, "gpt-5-mini")
       .send(validRequest)
       .expect(200);
 
     expect(aiInterpreter.mock.calls[0]?.[0]).toMatchObject({
       apiKey,
-      model: "gpt-5.4-mini"
+      model: "gpt-5-mini"
     });
     expect(response.body.score.overallScore).toBe(81);
     expect(JSON.stringify(response.body)).not.toContain(apiKey);
@@ -178,7 +226,7 @@ describe("RetailLens API", () => {
     const aiInterpreter = vi.fn(
       async (_args: InterpretBusinessArgs) => ({
         status: "unavailable" as const,
-        model: "gpt-5.6-sol",
+        model: "gpt-5",
         reason: "missing_api_key" as const
       })
     );
@@ -216,7 +264,7 @@ describe("RetailLens API", () => {
     const aiConnectionTester = vi.fn(
       async (args: TestAiConnectionArgs) => ({
         status: "ok" as const,
-        model: args.model ?? "gpt-5.6-sol"
+        model: args.model ?? "gpt-5"
       })
     );
     const app = createApp({
@@ -228,17 +276,17 @@ describe("RetailLens API", () => {
     const response = await request(app)
       .post("/api/ai/test")
       .set(OPENAI_KEY_HEADER, apiKey)
-      .set(OPENAI_MODEL_HEADER, "gpt-5.4-mini")
+      .set(OPENAI_MODEL_HEADER, "gpt-5-mini")
       .expect(200);
 
     expect(aiConnectionTester).toHaveBeenCalledWith({
       apiKey,
-      model: "gpt-5.4-mini"
+      model: "gpt-5-mini"
     });
     expect(response.body).toEqual({
       status: "ok",
       provider: "openai",
-      model: "gpt-5.4-mini"
+      model: "gpt-5-mini"
     });
     expect(JSON.stringify(response.body)).not.toContain(apiKey);
     expect(process.env.OPENAI_API_KEY).toBe("");
