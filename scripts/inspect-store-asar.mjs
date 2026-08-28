@@ -13,7 +13,24 @@ if (!archiveArgument || !evidenceArgument) {
 
 const archivePath = path.resolve(archiveArgument);
 const evidencePath = path.resolve(evidenceArgument);
-const entries = listPackage(archivePath);
+
+function normalizeAsarEntryPath(entry) {
+  const lookupPath = entry.replace(/^[/\\]+/, "");
+  return {
+    lookupPath,
+    normalizedPath: `/${lookupPath.replaceAll("\\", "/")}`
+  };
+}
+
+if (
+  normalizeAsarEntryPath("\\dist\\index.html").normalizedPath !==
+  "/dist/index.html"
+) {
+  throw new Error("Internal ASAR path normalization self-check failed.");
+}
+
+const entryRecords = listPackage(archivePath).map(normalizeAsarEntryPath);
+const entries = entryRecords.map((entry) => entry.normalizedPath);
 const requiredEntries = [
   "/LICENSE",
   "/THIRD_PARTY_NOTICES.txt",
@@ -70,14 +87,16 @@ if (!license.includes("MIT License") || !license.includes("LAI ZEYU")) {
   throw new Error("Packaged MIT license is missing or does not retain LAI ZEYU attribution.");
 }
 
-const inventory = entries
+const inventory = entryRecords
   .filter((entry) => {
-    const record = statFile(archivePath, entry.slice(1));
+    const record = statFile(archivePath, entry.lookupPath);
     return typeof record.size === "number";
   })
-  .sort((left, right) => left.localeCompare(right, "en"))
+  .sort((left, right) =>
+    left.normalizedPath.localeCompare(right.normalizedPath, "en")
+  )
   .map((entry) => {
-    const record = statFile(archivePath, entry.slice(1));
+    const record = statFile(archivePath, entry.lookupPath);
     if (
       record.integrity?.algorithm !== "SHA256" ||
       !/^[a-f0-9]{64}$/.test(record.integrity.hash) ||
@@ -87,7 +106,7 @@ const inventory = entries
       throw new Error(`Packaged app.asar entry lacks exact SHA-256 integrity metadata: ${entry}`);
     }
     return {
-      path: entry,
+      path: entry.normalizedPath,
       bytes: record.size,
       sha256: record.integrity.hash
     };
